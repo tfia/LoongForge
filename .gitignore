@@ -1,0 +1,52 @@
+# Local secrets
+.env
+*.env
+!.env.example
+!*/.env.example
+
+# macOS/editor noise
+.DS_Store
+.idea/
+.vscode/
+
+# Python caches and virtualenvs
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Logs and temporary outputs
+*.log
+*.tmp
+*.bak
+
+# Heavy build/install artifacts
+build/
+install/
+install-afl/
+
+# Generated runtime output. Curated, reviewable artifacts belong under data/.
+out/
+extract-llm/out/
+group-llm/out/
+
+# Local crawled/generated archives; keep manifests or curated exports under data/.
+gcc-bugzilla-loongarch/archive/
+
+# Compiler and native build products
+*.o
+*.a
+*.so
+*.dylib
+*.dSYM/
+*.map
+
+# AFL++ run directories and crash/queue corpora
+fuzz/
+queue/
+crashes/
+hangs/
+.cur_input

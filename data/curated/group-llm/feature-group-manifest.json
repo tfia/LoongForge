@@ -1,0 +1,81 @@
+{
+  "by_glue_role": {
+    "call_graph": 65,
+    "code_shape": 4,
+    "control_flow": 116,
+    "control_flow/data_flow": 1,
+    "data_flow": 117,
+    "data_flow_bridge": 1,
+    "oracle_scaffolding": 119,
+    "orchestrator": 4,
+    "shared_control": 1,
+    "shared_state": 183,
+    "shared_type": 1,
+    "target_context": 1,
+    "target_setup": 50,
+    "target_setup/data_flow": 1,
+    "type_bridge": 36,
+    "type_flow": 1,
+    "wrapper": 47
+  },
+  "by_language": {
+    "ada": 1,
+    "asm": 5,
+    "c": 243,
+    "c++": 29,
+    "cobol": 1,
+    "d": 2,
+    "fortran": 6,
+    "shell": 2
+  },
+  "by_test_mode": {
+    "assembly_scan": 29,
+    "compile_only": 93,
+    "diagnostic": 1,
+    "execute_differential": 162,
+    "link_test": 4
+  },
+  "counts": {
+    "average_glue_features_per_ready_group": 2.588,
+    "average_source_features_per_ready_group": 3.903,
+    "candidate_groups": 492,
+    "error_outputs": 0,
+    "glue_features": 748,
+    "missing_outputs": 0,
+    "outputs": 492,
+    "ready_groups": 289,
+    "rejected_groups": 203,
+    "source_feature_slots": 1128,
+    "unique_source_bugs": 190,
+    "unique_source_features": 751
+  },
+  "error_statuses": {},
+  "feature_coverage": {
+    "candidate_coverage_of_eligible_pool": 1.0,
+    "candidate_coverage_of_full_pool": 1.0,
+    "candidate_covered_features": 926,
+    "candidate_only_features": 175,
+    "eligible_candidate_covered_features": 926,
+    "eligible_feature_pool_records": 926,
+    "eligible_never_sampled_features": 0,
+    "eligible_ready_covered_features": 751,
+    "feature_pool_records": 926,
+    "never_sampled_features": 0,
+    "ready_coverage_of_eligible_pool": 0.811,
+    "ready_coverage_of_full_pool": 0.811,
+    "ready_covered_features": 751,
+    "uncovered_features": 175
+  },
+  "files": {
+    "all_results_jsonl": "/Users/mac/work/loong-gcc-afl/group-llm/out/feature-group-results.jsonl",
+    "ready_json": "/Users/mac/work/loong-gcc-afl/group-llm/out/feature-groups.json",
+    "ready_jsonl": "/Users/mac/work/loong-gcc-afl/group-llm/out/feature-groups.jsonl"
+  },
+  "generated_at": "2026-07-30T07:46:19Z",
+  "policy": {
+    "glue_features_require_future_coverage_validation_before_pool_promotion": true,
+    "ready_pool_excludes_rejected_and_error_outputs": true,
+    "source_features_are_immutable": true
+  },
+  "schema_version": 1
+}

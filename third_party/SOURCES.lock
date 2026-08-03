@@ -1,0 +1,30 @@
+# LoongForge third-party source lock
+
+Generated: 2026-08-04
+
+This file records the upstream compiler source revisions used by the local
+workspace. The actual source trees are Git submodules under `src/`; build and
+install products are intentionally not tracked by this monorepo.
+
+## GCC
+
+- Path: `src/gcc-upstream`
+- Remote: `https://gcc.gnu.org/git/gcc.git`
+- Branch at capture time: `master`
+- Commit: `913ff90691dbd1a94bb5b205415955dd053279dd`
+
+## binutils-gdb
+
+- Path: `src/binutils-gdb`
+- Remote: `ssh://sourceware.org/git/binutils-gdb.git`
+- Branch at capture time: `master`
+- Commit: `ca8bf5f5dd69eba877e74ca8bc0796388070401f`
+
+## Local build roots
+
+These paths are intentionally ignored by Git:
+
+- `build/`
+- `install/`
+- `install-afl/`
+- `out/`

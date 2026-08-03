@@ -1,0 +1,61 @@
+{
+  "by_status": {
+    "candidate_only": 175,
+    "ready_covered": 751
+  },
+  "counts": {
+    "candidate_coverage_of_eligible_pool": 1.0,
+    "candidate_coverage_of_full_pool": 1.0,
+    "candidate_covered_features": 926,
+    "candidate_only_features": 175,
+    "eligible_candidate_covered_features": 926,
+    "eligible_feature_pool_records": 926,
+    "eligible_never_sampled_features": 0,
+    "eligible_ready_covered_features": 751,
+    "feature_pool_records": 926,
+    "never_sampled_features": 0,
+    "ready_coverage_of_eligible_pool": 0.811,
+    "ready_coverage_of_full_pool": 0.811,
+    "ready_covered_features": 751,
+    "uncovered_features": 175
+  },
+  "covered_by_language": {
+    "ada": 1,
+    "asm": 42,
+    "c": 517,
+    "c++": 58,
+    "c-header": 1,
+    "cobol": 1,
+    "d": 2,
+    "fortran": 5,
+    "other": 1,
+    "rtl": 4,
+    "shell": 1,
+    "unknown": 118
+  },
+  "feature_pool": "/Users/mac/work/loong-gcc-afl/extract-llm/out/feature-pool.jsonl",
+  "files": {
+    "all_feature_coverage": "/Users/mac/work/loong-gcc-afl/group-llm/out/feature-coverage.jsonl",
+    "uncovered_features": "/Users/mac/work/loong-gcc-afl/group-llm/out/uncovered-features.jsonl"
+  },
+  "generated_at": "2026-07-30T07:46:19Z",
+  "schema_version": 1,
+  "uncovered_by_language": {
+    "RTL": 1,
+    "ada": 2,
+    "asm": 19,
+    "c": 115,
+    "c++": 2,
+    "d": 1,
+    "fortran": 2,
+    "unknown": 33
+  },
+  "uncovered_by_type": {
+    "code_shape": 27,
+    "failure_oracle": 35,
+    "mutation_knob": 22,
+    "pass_interaction": 24,
+    "semantic_invariant": 43,
+    "target_condition": 24
+  }
+}

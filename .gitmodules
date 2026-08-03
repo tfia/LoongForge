@@ -1,0 +1,7 @@
+[submodule "src/gcc-upstream"]
+	path = src/gcc-upstream
+	url = https://gcc.gnu.org/git/gcc.git
+
+[submodule "src/binutils-gdb"]
+	path = src/binutils-gdb
+	url = ssh://sourceware.org/git/binutils-gdb.git
