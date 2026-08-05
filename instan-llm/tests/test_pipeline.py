@@ -15,6 +15,7 @@ from instan_llm.pipeline import (
     normalize_instantiation_output,
     run_synthesis,
     sanitize_compiler_options,
+    select_groups,
     stable_hash,
     validate_instantiation,
     verify_outputs,
@@ -197,6 +198,14 @@ class PipelineTests(unittest.TestCase):
         )
         self.assertEqual(sanitize_compiler_options(["-mlsx"]), ["-O2", "-mlsx"])
 
+    def test_select_groups_can_filter_languages(self):
+        c_group = ready_group("c")
+        fortran_group = ready_group("fortran")
+        fortran_group["candidate_id"] = "group-0002-fortran"
+        fortran_group["group_uid"] = "group-0002-fortran-feedface"
+        selected = select_groups([c_group, fortran_group], languages=["c", "c++"])
+        self.assertEqual([item["group_uid"] for item in selected], [c_group["group_uid"]])
+
     def test_run_synthesis_with_fake_model_and_verify(self):
         group = ready_group()
 
@@ -270,6 +279,7 @@ class PipelineTests(unittest.TestCase):
             write_jsonl(groups_file, [group])
             report = generate_coverage_report(output, groups_file)
             self.assertEqual(report["counts"]["covered"], 1)
+            self.assertEqual(report["counts"]["union_edges"], 2)
             self.assertIn("InstanLLM 阶段覆盖率报告", Path(report["report_path"]).read_text(encoding="utf-8"))
 
     def test_evaluate_skips_unsupported_language(self):
@@ -283,6 +293,25 @@ class PipelineTests(unittest.TestCase):
             write_json(instantiation_output_path(output, group["group_uid"]), instantiation)
             manifest = evaluate_instantiations(output)
             self.assertEqual(manifest["counts"]["statuses"], {"skipped_unsupported_language": 1})
+
+    def test_evaluate_skips_error_without_instantiation_id(self):
+        group = ready_group()
+        instantiation = {
+            "schema_version": 1,
+            "group_uid": group["group_uid"],
+            "candidate_id": group["candidate_id"],
+            "instantiation_status": "error",
+            "error": "model output did not validate",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            output.mkdir()
+            write_json(instantiation_output_path(output, group["group_uid"]), instantiation)
+            manifest = evaluate_instantiations(output)
+            self.assertEqual(manifest["counts"]["statuses"], {"skipped_not_ready": 1})
+            evaluations = list((output / "evaluations").glob("*.evaluation.json"))
+            evaluation = json.loads(evaluations[0].read_text(encoding="utf-8"))
+            self.assertEqual(evaluation["candidate_id"], group["candidate_id"])
 
     def test_dotenv_parser(self):
         with tempfile.TemporaryDirectory() as directory:

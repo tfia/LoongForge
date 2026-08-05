@@ -7,15 +7,16 @@
 
 当前 LLM 管线已扩展为 ExtractLLM -> GroupLLM -> InstanLLM。新增 `instan-llm/` 模块负责读取 GroupLLM 的 ready feature groups，生成完整编译器测试程序，并用 AFL++ wrapped GCC 前端编译记录 edge coverage。只有成功产生非空 coverage map 的 C/C++ 程序会进入 `instan-llm/out/corpus/covered/`，作为后续 CI corpus 候选。
 
-2026-08-05 阶段验证结果：从 289 个 GroupLLM ready groups 中选择 24 个 C/C++ groups 做真实 LLM API 测试，InstanLLM 生成 24 个 ready 程序，AFL++ wrapped GCC 覆盖评估 24/24 covered。edge map 条目范围为 2631 到 84303，平均 17002.2。阶段覆盖报告已写入 `docs/InstanLLM_阶段覆盖率报告.md`。
+2026-08-05 阶段验证结果：对当前 evaluator 可直接处理的全部 272 个 C/C++ GroupLLM ready groups 做真实 LLM API 测试。InstanLLM 生成 260 个 ready 程序，10 个 rejected，2 个持续 API/parser error；260 个 ready 程序均通过 AFL++ wrapped GCC 覆盖评估并产生非空 edge map。当前批次 union edge 为 261,917，单测例 edge map 条目范围为 2631 到 101423，平均 20319.6。阶段覆盖报告已写入 `docs/InstanLLM_阶段覆盖率报告.md`。
 
 InstanLLM 后续 roadmap：
 
-1. 扩大 C/C++ 批量：从 24 个扩到全部 272 个 C/C++ ready groups，记录每轮 ready/covered/edge 分布，失败项进入可复现修复队列。
+1. 固化 C/C++ 全量批次：保留当前 260 个 covered 程序作为 CI corpus 候选，并把 10 个 rejected、2 个 error 作为可复现的 InstanLLM 修复队列。
 2. 增强 oracle：区分 `compile_success`、`compile_failure`、`assembly_scan`、`runtime_exit` 和 `differential`，避免所有测试只按“能编译并有 edge”判定。
-3. 接入 corpus admission：只把 covered 且 oracle 合格的程序加入 CI corpus，并用 AFL edge 增量筛掉重复覆盖样例。
-4. 补齐专用 harness：为 assembly-scan、diagnostic、Fortran、asm、RTL、Ada/D/COBOL/shell 分别实现 evaluator。当前这些 GroupLLM ready groups 不是无效，而是不能直接用 `cc1/cc1plus` wrapper 评价。
-5. 回流组合策略：把 InstanLLM/evaluator 失败原因反馈给 GroupLLM 采样和 candidate-only backlog 分类，减少不可实例化组合。
+3. 增加 GCC 源码覆盖重放：单独构建带 gcov/llvm-cov 口径的 GCC，用同一批 covered corpus 统计源码行/函数覆盖；AFL edge map 继续作为 fuzz/CI 入库筛选指标。
+4. 接入 corpus admission：只把 covered 且 oracle 合格、或能带来新增 union edge 的程序加入 CI corpus，重复覆盖样例降级为备选语料。
+5. 补齐专用 harness：为 assembly-scan、diagnostic、Fortran、asm、RTL、Ada/D/COBOL/shell 分别实现 evaluator。当前这些 GroupLLM ready groups 不是无效，而是不能直接用 `cc1/cc1plus` wrapper 评价。
+6. 回流组合策略：把 InstanLLM/evaluator 失败原因反馈给 GroupLLM 采样和 candidate-only backlog 分类，减少不可实例化组合。
 
 ## 一、工作定位与阶段结论
 

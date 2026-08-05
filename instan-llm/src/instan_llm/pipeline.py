@@ -23,7 +23,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set
 
 
 SCHEMA_VERSION = 1
@@ -216,9 +216,12 @@ def load_ready_groups(groups_file: Path) -> List[Dict[str, Any]]:
 def select_groups(
     groups: Sequence[Mapping[str, Any]],
     group_ids: Optional[Sequence[str]] = None,
+    *,
+    languages: Optional[Sequence[str]] = None,
     limit: int = 0,
 ) -> List[Dict[str, Any]]:
     wanted = {str(item) for item in group_ids or []}
+    allowed_languages = {canonical_language(item) for item in languages or []}
     selected: List[Dict[str, Any]] = []
     for group in groups:
         identifiers = {
@@ -226,6 +229,8 @@ def select_groups(
             str(group.get("candidate_id") or ""),
         }
         if wanted and not wanted.intersection(identifiers):
+            continue
+        if allowed_languages and canonical_language(group.get("language")) not in allowed_languages:
             continue
         selected.append(json.loads(json.dumps(group, ensure_ascii=False)))
         if limit and len(selected) >= limit:
@@ -515,14 +520,32 @@ def raw_response_path(output_dir: Path, group_uid: str) -> Path:
     return output_dir / "raw-responses" / f"{group_uid}.deepseek-response.json"
 
 
+def fallback_instantiation_id(instantiation: Mapping[str, Any]) -> str:
+    existing = str(instantiation.get("instantiation_id") or "").strip()
+    if existing:
+        return re.sub(r"[^A-Za-z0-9_.-]+", "_", existing)
+    stem = str(instantiation.get("candidate_id") or instantiation.get("group_uid") or "instantiation")
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", stem.strip()) or "instantiation"
+    digest = stable_hash(
+        {
+            "group_uid": instantiation.get("group_uid"),
+            "candidate_id": instantiation.get("candidate_id"),
+            "status": instantiation.get("instantiation_status"),
+        },
+        16,
+    )
+    return f"{stem}-{digest}"
+
+
 def program_source_path(output_dir: Path, instantiation: Mapping[str, Any]) -> Path:
     language = canonical_language(instantiation.get("language"))
     suffix = LANGUAGE_EXTENSIONS.get(language, ".txt")
+    instantiation_id = fallback_instantiation_id(instantiation)
     file_name = str(instantiation.get("file_name") or "").strip()
-    safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(file_name).stem or str(instantiation["instantiation_id"]))
+    safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(file_name).stem or instantiation_id)
     if not safe_stem:
-        safe_stem = str(instantiation["instantiation_id"])
-    return output_dir / "programs" / f"{safe_stem}{suffix}"
+        safe_stem = instantiation_id
+    return output_dir / "programs" / f"{instantiation_id}.{safe_stem}{suffix}"
 
 
 def write_program_source(output_dir: Path, instantiation: Mapping[str, Any]) -> Path:
@@ -601,8 +624,10 @@ def synthesize_one(
             time.sleep(min(2.0 * attempt, 8.0))
     return {
         "schema_version": SCHEMA_VERSION,
+        "instantiation_id": fallback_instantiation_id(group),
         "group_uid": group.get("group_uid"),
         "candidate_id": group.get("candidate_id"),
+        "language": canonical_language(group.get("language")),
         "source_feature_uids": string_list(group.get("source_feature_uids")),
         "instantiation_status": "error",
         "error": redact_secrets(str(last_error or "unknown error")),
@@ -621,6 +646,7 @@ def run_synthesis(
     output_dir: Path,
     env_file: Path,
     group_ids: Optional[Sequence[str]] = None,
+    languages: Optional[Sequence[str]] = None,
     limit: int = 0,
     refresh: bool = False,
     retries: int = 3,
@@ -637,7 +663,12 @@ def run_synthesis(
     base_url = values.get("DEEPSEEK_API_ENDPOINT") or DEFAULT_BASE_URL
     model = values.get("DEEPSEEK_MODEL") or DEFAULT_MODEL
     api_key = values.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_API_KEY") or ""
-    groups = select_groups(load_ready_groups(groups_file), group_ids, limit)
+    groups = select_groups(
+        load_ready_groups(groups_file),
+        group_ids,
+        languages=languages,
+        limit=limit,
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     selected_for_work: List[Dict[str, Any]] = []
@@ -695,6 +726,7 @@ def run_synthesis(
             "selected_groups": len(groups),
             "limit": limit,
             "group_ids": list(group_ids or []),
+            "languages": list(languages or []),
             "refresh": refresh,
             "retries": retries,
             "workers": worker_count,
@@ -803,15 +835,18 @@ def evaluate_one(
     min_edges: int,
     showmap_script: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    instantiation_id = str(instantiation.get("instantiation_id") or "")
-    if not instantiation_id:
-        raise PipelineError("instantiation lacks instantiation_id")
+    status = str(instantiation.get("instantiation_status") or "")
+    instantiation_id = fallback_instantiation_id(instantiation)
+    if status == "ready" and not str(instantiation.get("instantiation_id") or "").strip():
+        raise PipelineError("ready instantiation lacks instantiation_id")
     language = canonical_language(instantiation.get("language"))
-    if instantiation.get("instantiation_status") != "ready":
+    if status != "ready":
         evaluation = {
             "schema_version": SCHEMA_VERSION,
             "instantiation_id": instantiation_id,
             "group_uid": instantiation.get("group_uid"),
+            "candidate_id": instantiation.get("candidate_id"),
+            "language": language,
             "evaluation_status": "skipped_not_ready",
             "created_at": utc_now(),
         }
@@ -828,9 +863,7 @@ def evaluate_one(
         }
         write_json(evaluation_output_path(output_dir, instantiation_id), evaluation)
         return evaluation
-    source_path = Path(str(instantiation.get("source_path") or ""))
-    if not source_path.is_file():
-        source_path = write_program_source(output_dir, instantiation)
+    source_path = write_program_source(output_dir, instantiation)
     map_path = output_dir / "coverage" / f"{instantiation_id}.map"
     map_path.parent.mkdir(parents=True, exist_ok=True)
     options = sanitize_compiler_options(string_list(instantiation.get("compiler_options")))
@@ -913,9 +946,9 @@ def evaluate_instantiations(
     evaluations: List[Dict[str, Any]] = []
     skipped_existing = 0
     for instantiation in selected:
-        instantiation_id = str(instantiation.get("instantiation_id") or "")
+        instantiation_id = fallback_instantiation_id(instantiation)
         existing = evaluation_output_path(output_dir, instantiation_id)
-        if instantiation_id and existing.is_file() and not refresh:
+        if existing.is_file() and not refresh:
             evaluations.append(read_json(existing))
             skipped_existing += 1
             continue
@@ -1001,6 +1034,30 @@ def markdown_table(headers: Sequence[str], rows: Sequence[Sequence[Any]]) -> str
     return "\n".join(lines)
 
 
+def read_edge_map(path: Path) -> Set[str]:
+    edges: Set[str] = set()
+    if not path.is_file():
+        return edges
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for raw in handle:
+            line = raw.strip()
+            if not line:
+                continue
+            edge_id = line.split(":", 1)[0].strip()
+            if edge_id:
+                edges.add(edge_id)
+    return edges
+
+
+def edge_map_by_evaluation(evaluations: Sequence[Mapping[str, Any]]) -> Dict[str, Set[str]]:
+    result: Dict[str, Set[str]] = {}
+    for evaluation in evaluations:
+        instantiation_id = str(evaluation.get("instantiation_id") or "")
+        map_path = Path(str((evaluation.get("coverage") or {}).get("map_path") or ""))
+        result[instantiation_id] = read_edge_map(map_path)
+    return result
+
+
 def generate_coverage_report(
     output_dir: Path,
     groups_file: Path,
@@ -1016,11 +1073,14 @@ def generate_coverage_report(
     instantiations = load_instantiation_inventory(output_dir)
     evaluations = load_evaluation_inventory(output_dir)
     covered = [item for item in evaluations if item.get("evaluation_status") == "covered"]
+    edge_sets = edge_map_by_evaluation(covered)
+    union_edges = set().union(*edge_sets.values()) if edge_sets else set()
     edge_counts = [
         int(item.get("coverage", {}).get("edge_map_entries") or 0)
         for item in covered
     ]
     all_langs = Counter(canonical_language(group.get("language")) for group in groups)
+    groups_by_uid = {str(group.get("group_uid") or ""): group for group in groups}
     selected_group_ids = {str(item.get("group_uid") or "") for item in instantiations}
     selected_groups = [group for group in groups if str(group.get("group_uid") or "") in selected_group_ids]
     selected_langs = Counter(canonical_language(group.get("language")) for group in selected_groups)
@@ -1040,19 +1100,34 @@ def generate_coverage_report(
         "max": max(edge_counts) if edge_counts else 0,
         "avg": round(sum(edge_counts) / len(edge_counts), 1) if edge_counts else 0,
         "median": median(edge_counts),
+        "union": len(union_edges),
     }
+    ready_count = instantiation_statuses.get("ready", 0)
+    covered_count = evaluation_statuses.get("covered", 0)
     rows = []
+    seen_edges = set()
     for evaluation in sorted(
         evaluations,
         key=lambda item: (str(item.get("candidate_id") or ""), str(item.get("instantiation_id") or "")),
     ):
         coverage = evaluation.get("coverage") or {}
+        instantiation_id = str(evaluation.get("instantiation_id") or "")
+        group = groups_by_uid.get(str(evaluation.get("group_uid") or ""), {})
+        language = canonical_language(evaluation.get("language"))
+        if language == "unknown":
+            language = canonical_language(group.get("language"))
+        edges = edge_sets.get(instantiation_id, set())
+        new_edges = len(edges - seen_edges)
+        if evaluation.get("evaluation_status") == "covered":
+            seen_edges.update(edges)
         rows.append(
             [
                 evaluation.get("candidate_id"),
-                evaluation.get("language"),
+                language,
                 evaluation.get("evaluation_status"),
                 coverage.get("edge_map_entries", 0),
+                new_edges,
+                percent(len(edges), len(union_edges)),
                 Path(str(evaluation.get("source_path") or "")).name,
             ]
         )
@@ -1073,14 +1148,23 @@ def generate_coverage_report(
                 ["当前 evaluator 可直接处理的 C/C++ ready groups", cxx_ready],
                 ["其他语言/专用 harness backlog", unsupported_ready],
                 ["本轮选择的 groups", len(selected_groups)],
-                ["InstanLLM ready", instantiation_statuses.get("ready", 0)],
-                ["AFL++ covered", evaluation_statuses.get("covered", 0)],
-                ["本轮 InstanLLM ready 率", percent(instantiation_statuses.get("ready", 0), len(instantiations))],
-                ["本轮 AFL covered 率", percent(evaluation_statuses.get("covered", 0), len(instantiations))],
-                ["本轮覆盖 GroupLLM ready 比例", percent(len(selected_groups), len(groups))],
-                ["本轮覆盖 C/C++ ready 比例", percent(len(selected_groups), cxx_ready)],
+                ["InstanLLM ready", ready_count],
+                ["AFL++ covered", covered_count],
+                ["本轮 C/C++ groups 选择率", percent(len(selected_groups), cxx_ready)],
+                ["InstanLLM 生成 ready 率", percent(ready_count, len(selected_groups))],
+                ["ready 程序 AFL covered 率", percent(covered_count, ready_count)],
+                ["C/C++ group 端到端 covered 率", percent(covered_count, len(selected_groups))],
+                ["GroupLLM 全 ready 端到端 covered 比例", percent(covered_count, len(groups))],
             ],
         ),
+        "",
+        "## 结果解读",
+        "",
+        f"- 当前 C/C++ 可测范围已经全量进入 InstanLLM：{len(selected_groups)}/{cxx_ready} 个 C/C++ ready groups 被选择并评估，不再是小样本抽测。",
+        f"- {covered_count}/{ready_count} 个 InstanLLM ready 程序均产生非空 AFL edge map，说明这些测例可以稳定驱动被测 GCC 前端执行，适合作为 CI corpus 候选。",
+        f"- 未进入 covered 的 {len(selected_groups) - covered_count} 个 C/C++ group 停在 InstanLLM 生成阶段，其中 rejected {instantiation_statuses.get('rejected', 0)} 个、error {instantiation_statuses.get('error', 0)} 个；这不是 AFL/GCC 覆盖失败，应进入提示词、schema 或模型重试策略的修复队列。",
+        f"- 本轮 union edge 为 {edge_summary['union']}，可作为后续 corpus admission 和趋势回归基线；单测例 `新增 edge` 为 0 的程序不一定无价值，但在入库优先级上应低于能增加 union edge 或具备强 oracle 的程序。",
+        "- 当前报告仍是 AFL edge 覆盖口径。若质量汇报需要“GCC 源码行/函数覆盖率”，需要用同一 corpus 重放一个 gcov/llvm-cov 口径的 GCC 构建，两个指标并列呈现。",
         "",
         "## AFL edge map 统计",
         "",
@@ -1088,6 +1172,7 @@ def generate_coverage_report(
             ["指标", "数值"],
             [
                 ["covered programs", len(covered)],
+                ["本轮累计 union edge 数", edge_summary["union"]],
                 ["最小 edge map 条目", edge_summary["min"]],
                 ["最大 edge map 条目", edge_summary["max"]],
                 ["平均 edge map 条目", edge_summary["avg"]],
@@ -1095,7 +1180,9 @@ def generate_coverage_report(
             ],
         ),
         "",
-        "这些 edge map 条目来自 AFL++ instrumentation，不是 gcov 源码行覆盖率。它用于比较同一 wrapped GCC、同一前端和同一编译参数口径下的编译器路径覆盖趋势。",
+        "这些 edge map 条目来自 AFL++ instrumentation，不是 gcov 源码行覆盖率。`edge entries` 是单个测例触发的控制流边数量，`union edge` 是本轮所有 covered 测例触发的去重边集合。`union 占比` 表示某个测例单独覆盖了本轮 union edge 的多少；`新增 edge` 表示按表格顺序加入 corpus 时该测例带来的新增去重边数。",
+        "",
+        "如果要回答“覆盖了 GCC 源码多少行/函数”，需要额外构建带源码覆盖插桩的 GCC（例如 gcov/llvm-cov 口径）并在同一批测例上重放。当前报告先给出 AFL++ edge 覆盖，这是 fuzz/CI 入库筛选的直接反馈指标。",
         "",
         "## 语言与 oracle 分布",
         "",
@@ -1107,13 +1194,13 @@ def generate_coverage_report(
         "",
         "## 本轮程序明细",
         "",
-        markdown_table(["candidate", "language", "status", "edge entries", "source"], rows),
+        markdown_table(["candidate", "language", "status", "edge entries", "新增 edge", "union 占比", "source"], rows),
         "",
         "## 当前边界与后续工作",
         "",
         "- 当前 evaluator 直接复用 `scripts/afl-showmap-gcc.sh`，因此只对 C/C++ 调用 `cc1`/`cc1plus` 形成覆盖数据。",
         "- Fortran/Ada/D/asm/RTL/shell/COBOL ready groups 并非无效，而是需要对应前端或专用 harness：例如 `f951`、GNAT、D frontend、assembler scan、RTL dump/compile pass 或 shell-driven multi-file harness。",
-        "- 下一阶段应优先扩大 C/C++ 批量规模，随后为 assembly-scan、diagnostic、Fortran/asm/RTL 分别实现 evaluator，并保持报告中的语言分布口径。",
+        "- C/C++ ready groups 已完成全量 InstanLLM + AFL edge 评估。下一阶段应补源码行/函数覆盖重放、细化 oracle，并为 assembly-scan、diagnostic、Fortran/asm/RTL 分别实现 evaluator。",
         "",
     ]
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1132,6 +1219,7 @@ def generate_coverage_report(
             "instantiations": len(instantiations),
             "evaluations": len(evaluations),
             "covered": len(covered),
+            "union_edges": len(union_edges),
         },
         "edge_summary": edge_summary,
     }

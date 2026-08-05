@@ -24,6 +24,13 @@ from .pipeline import (
 )
 
 
+def csv_values(value: str) -> Sequence[str]:
+    result = [item.strip() for item in value.split(",") if item.strip()]
+    if not result:
+        raise argparse.ArgumentTypeError("expected at least one comma-separated value")
+    return result
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -47,6 +54,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="dotenv file with DEEPSEEK_API_ENDPOINT, DEEPSEEK_API_KEY, and DEEPSEEK_MODEL",
     )
     run.add_argument("--group-id", action="append", default=None)
+    run.add_argument(
+        "--languages",
+        type=csv_values,
+        default=None,
+        help="comma-separated GroupLLM languages to instantiate, e.g. c,c++",
+    )
     run.add_argument("--limit", type=int, default=0)
     run.add_argument("--refresh", action="store_true")
     run.add_argument("--retries", type=int, default=3)
@@ -98,6 +111,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 output_dir=args.output_dir,
                 env_file=args.env_file,
                 group_ids=args.group_id,
+                languages=args.languages,
                 limit=args.limit,
                 refresh=args.refresh,
                 retries=args.retries,

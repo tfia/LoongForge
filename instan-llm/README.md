@@ -98,7 +98,7 @@ The report separates four different numbers:
 - generated programs that passed InstanLLM structural validation
 - generated programs that compiled through the AFL++ wrapped GCC frontend and produced non-empty edge coverage
 
-Current stage result on 2026-08-05: 24 selected C/C++ groups produced 24 ready instantiations and 24 AFL++ covered programs.
+Current stage result on 2026-08-05: all 272 C/C++ GroupLLM ready groups were sent through InstanLLM. The run produced 260 ready instantiations, 10 model rejections, and 2 persistent API/parser error records. All 260 ready programs compiled through the AFL++ wrapped GCC frontend and produced non-empty edge maps; the batch union edge count was 261,917.
 
 ## Verify
 
@@ -109,7 +109,7 @@ PYTHONPATH=src python3 -m instan_llm verify --require-evaluations --min-covered 
 
 ## Current Limits
 
-The first evaluator supports C and C++ programs because the existing AFL wrapper targets `cc1` and `cc1plus`. InstanLLM may still record rejected or unsupported-language instantiations for Fortran, Ada, D, COBOL, asm, shell, or RTL groups. Those require future language-specific wrappers or harnesses before they can enter the covered corpus.
+The first evaluator supports C and C++ programs because the existing AFL wrapper targets `cc1` and `cc1plus`. InstanLLM may still record rejected or unsupported-language instantiations for Fortran, Ada, D, COBOL, asm, shell, or RTL groups. Those require future language-specific wrappers or harnesses before they can enter the covered corpus. AFL edge maps are compiler execution-path coverage signals, not GCC source line/function coverage; source coverage requires a separate gcov/llvm-cov-style GCC build and replay of the same corpus.
 
 This means the non-C/C++ groups are not considered invalid. They are waiting for a matching evaluator:
 
