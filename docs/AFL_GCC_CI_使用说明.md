@@ -197,7 +197,7 @@ out/ci-smoke/queue-coverage-c.map
 | `saved_crashes` | ICE（退出码 4）或进程崩溃样例数 |
 | `saved_hangs` | 超时样例数，需要区分真实性能回归和阈值过紧 |
 
-注意：AFL 的控制流边覆盖率不是 `gcov` 的源码行覆盖率。前者用于引导 fuzz 和衡量路径探索；若领导或质量体系要求“源码行/函数覆盖率”，应另建一套使用 GCC coverage flags 和 `gcov` 的构建与报告流程，两种指标并列呈现，不应互相替代。
+注意：AFL 的控制流边覆盖率不是 `gcov` 的源码行覆盖率。前者用于引导 fuzz 和衡量路径探索；若领导或质量体系要求“源码行/函数覆盖率”，使用 `scripts/build-gcc-gcov.sh` 和 `scripts/gcc-source-coverage-replay.py` 生成 gcov 口径报告，两种指标并列呈现，不应互相替代。
 
 ## 7. 建议的 CI 判定规则
 

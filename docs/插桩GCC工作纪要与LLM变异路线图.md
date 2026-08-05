@@ -9,14 +9,17 @@
 
 2026-08-05 阶段验证结果：对当前 evaluator 可直接处理的全部 272 个 C/C++ GroupLLM ready groups 做真实 LLM API 测试。InstanLLM 生成 260 个 ready 程序，10 个 rejected，2 个持续 API/parser error；260 个 ready 程序均通过 AFL++ wrapped GCC 覆盖评估并产生非空 edge map。当前批次 union edge 为 261,917，单测例 edge map 条目范围为 2631 到 101423，平均 20319.6。阶段覆盖报告已写入 `docs/InstanLLM_阶段覆盖率报告.md`。
 
+随后已单独构建 gcov 口径 GCC，并用同一批 260 个 covered corpus 重放，开始回答“覆盖了多少 GCC 源码行/函数”的质量汇报问题。当前源码覆盖口径只统计真实存在于 `src/gcc-upstream` 下的 GCC 源码文件，不把测试程序、系统头文件或 build 目录生成文件计入分母；结果为源码行覆盖 298,606/909,439（32.83%）、函数覆盖 38,216/95,267（40.11%）、分支覆盖 224,427/828,708（27.08%）。260 条测例均已执行，其中 104 条返回 0、156 条非零退出；非零退出多来自缺少外部头文件或负向测试，但仍会覆盖 GCC 前端、诊断和 include 搜索路径，因此保留在质量测试覆盖口径中。
+
 InstanLLM 后续 roadmap：
 
 1. 固化 C/C++ 全量批次：保留当前 260 个 covered 程序作为 CI corpus 候选，并把 10 个 rejected、2 个 error 作为可复现的 InstanLLM 修复队列。
 2. 增强 oracle：区分 `compile_success`、`compile_failure`、`assembly_scan`、`runtime_exit` 和 `differential`，避免所有测试只按“能编译并有 edge”判定。
-3. 增加 GCC 源码覆盖重放：单独构建带 gcov/llvm-cov 口径的 GCC，用同一批 covered corpus 统计源码行/函数覆盖；AFL edge map 继续作为 fuzz/CI 入库筛选指标。
-4. 接入 corpus admission：只把 covered 且 oracle 合格、或能带来新增 union edge 的程序加入 CI corpus，重复覆盖样例降级为备选语料。
-5. 补齐专用 harness：为 assembly-scan、diagnostic、Fortran、asm、RTL、Ada/D/COBOL/shell 分别实现 evaluator。当前这些 GroupLLM ready groups 不是无效，而是不能直接用 `cc1/cc1plus` wrapper 评价。
-6. 回流组合策略：把 InstanLLM/evaluator 失败原因反馈给 GroupLLM 采样和 candidate-only backlog 分类，减少不可实例化组合。
+3. 固化源码覆盖重放：保留 gcov 口径 GCC 构建和 `scripts/gcc-source-coverage-replay.py`，在 CI 中用同一 covered corpus 同时输出 AFL edge 和 GCC 源码行/函数覆盖。
+4. 提升可编译比例：补齐高频缺失头文件依赖或改写 InstanLLM prompt，降低 `ffi.h` 等外部依赖导致的非零退出，提升源码覆盖统计中的返回 0 比例。
+5. 接入 corpus admission：只把 covered 且 oracle 合格、或能带来新增 union edge/源码覆盖增量的程序加入 CI corpus，重复覆盖样例降级为备选语料。
+6. 补齐专用 harness：为 assembly-scan、diagnostic、Fortran、asm、RTL、Ada/D/COBOL/shell 分别实现 evaluator。当前这些 GroupLLM ready groups 不是无效，而是不能直接用 `cc1/cc1plus` wrapper 评价。
+7. 回流组合策略：把 InstanLLM/evaluator 失败原因反馈给 GroupLLM 采样和 candidate-only backlog 分类，减少不可实例化组合。
 
 ## 一、工作定位与阶段结论
 
@@ -187,14 +190,17 @@ GCC 配置为：
 | `scripts/afl-corpus-coverage.sh` | 语料累计覆盖、基线比较和最低阈值 |
 | `scripts/run-gcc-afl-fuzz.sh` | 直接针对 `cc1/cc1plus` 的质量 fuzz 启动器 |
 | `scripts/afl-coverage-report.sh` | 自动生成 Markdown 质量与覆盖报告 |
+| `scripts/build-gcc-gcov.sh` | 构建 gcov 口径 GCC，用于源码行/函数覆盖统计 |
+| `scripts/gcc-source-coverage-replay.py` | 用 InstanLLM covered corpus 重放 coverage GCC 并生成源码覆盖报告 |
 | `docs/AFL_GCC_CI_使用说明.md` | 操作手册和 CI 指标解释 |
+| `docs/GCC源码覆盖率使用说明.md` | gcov 源码覆盖率构建、重放和汇报口径说明 |
 | `seeds/`、`seeds-cxx/` | C 与 C++ 最小可运行种子 |
 
 ## 六、技术选择
 
 1. **默认 fuzz `cc1/cc1plus`。** 减少 GCC driver 进程管理开销，避免 driver 和前端两层插桩覆盖混合，提高吞吐和指标可比性。
 2. **把 ICE 退出码作为一等质量故障。** 语法错误不应被当成 crash；ICE 退出码 4 才进入 AFL crashes 队列。
-3. **覆盖趋势和源码覆盖分开。** AFL bitmap/edge coverage 用于路径探索；若需要源码行和函数覆盖率，另建 gcov 流程。
+3. **覆盖趋势和源码覆盖分开。** AFL bitmap/edge coverage 用于路径探索和入库筛选；gcov 源码行/函数覆盖用于质量汇报和 CI 趋势，两者并列呈现。
 4. **构建和运行环境显式化。** 不依赖 fish 会话中是否导出变量，保证 CI 可重复。
 5. **LLM 不进入 AFL 高频执行热路径。** 远程模型响应慢、成本高且存在网络波动，不能每次执行都同步请求。
 

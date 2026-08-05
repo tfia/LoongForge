@@ -100,6 +100,8 @@ The report separates four different numbers:
 
 Current stage result on 2026-08-05: all 272 C/C++ GroupLLM ready groups were sent through InstanLLM. The run produced 260 ready instantiations, 10 model rejections, and 2 persistent API/parser error records. All 260 ready programs compiled through the AFL++ wrapped GCC frontend and produced non-empty edge maps; the batch union edge count was 261,917.
 
+The same 260 covered corpus has also been replayed on a gcov-instrumented GCC build. Current source-coverage result: 298,606/909,439 GCC source lines (32.83%), 38,216/95,267 functions (40.11%), and 224,427/828,708 branches (27.08%). The detailed report is generated at `../out/source-coverage/instanllm-covered/gcc-source-coverage-report.md`.
+
 ## Verify
 
 ```bash
@@ -109,7 +111,7 @@ PYTHONPATH=src python3 -m instan_llm verify --require-evaluations --min-covered 
 
 ## Current Limits
 
-The first evaluator supports C and C++ programs because the existing AFL wrapper targets `cc1` and `cc1plus`. InstanLLM may still record rejected or unsupported-language instantiations for Fortran, Ada, D, COBOL, asm, shell, or RTL groups. Those require future language-specific wrappers or harnesses before they can enter the covered corpus. AFL edge maps are compiler execution-path coverage signals, not GCC source line/function coverage; source coverage requires a separate gcov/llvm-cov-style GCC build and replay of the same corpus.
+The first evaluator supports C and C++ programs because the existing AFL wrapper targets `cc1` and `cc1plus`. InstanLLM may still record rejected or unsupported-language instantiations for Fortran, Ada, D, COBOL, asm, shell, or RTL groups. Those require future language-specific wrappers or harnesses before they can enter the covered corpus. AFL edge maps are compiler execution-path coverage signals, not GCC source line/function coverage; source coverage is reported by the separate gcov replay workflow in `../scripts/gcc-source-coverage-replay.py`.
 
 This means the non-C/C++ groups are not considered invalid. They are waiting for a matching evaluator:
 

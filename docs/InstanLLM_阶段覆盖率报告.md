@@ -1,6 +1,6 @@
 # InstanLLM 阶段覆盖率报告
 
-生成时间：`2026-08-05T16:36:53Z`
+生成时间：`2026-08-05T16:59:07Z`
 
 测试范围：自有 LoongArch GCC fork 的编译器 CI 质量测试；不涉及网络安全测试。
 
@@ -26,7 +26,7 @@
 - 260/260 个 InstanLLM ready 程序均产生非空 AFL edge map，说明这些测例可以稳定驱动被测 GCC 前端执行，适合作为 CI corpus 候选。
 - 未进入 covered 的 12 个 C/C++ group 停在 InstanLLM 生成阶段，其中 rejected 10 个、error 2 个；这不是 AFL/GCC 覆盖失败，应进入提示词、schema 或模型重试策略的修复队列。
 - 本轮 union edge 为 261917，可作为后续 corpus admission 和趋势回归基线；单测例 `新增 edge` 为 0 的程序不一定无价值，但在入库优先级上应低于能增加 union edge 或具备强 oracle 的程序。
-- 当前报告仍是 AFL edge 覆盖口径。若质量汇报需要“GCC 源码行/函数覆盖率”，需要用同一 corpus 重放一个 gcov/llvm-cov 口径的 GCC 构建，两个指标并列呈现。
+- 已用同一批 covered corpus 重放 gcov 口径 GCC：源码行覆盖 298606/909439 (32.83%)，函数覆盖 38216/95267 (40.11%)。
 
 ## AFL edge map 统计
 
@@ -41,7 +41,22 @@
 
 这些 edge map 条目来自 AFL++ instrumentation，不是 gcov 源码行覆盖率。`edge entries` 是单个测例触发的控制流边数量，`union edge` 是本轮所有 covered 测例触发的去重边集合。`union 占比` 表示某个测例单独覆盖了本轮 union edge 的多少；`新增 edge` 表示按表格顺序加入 corpus 时该测例带来的新增去重边数。
 
-如果要回答“覆盖了 GCC 源码多少行/函数”，需要额外构建带源码覆盖插桩的 GCC（例如 gcov/llvm-cov 口径）并在同一批测例上重放。当前报告先给出 AFL++ edge 覆盖，这是 fuzz/CI 入库筛选的直接反馈指标。
+## GCC 源码行/函数覆盖率
+
+| 指标 | 数值 |
+| --- | --- |
+| gcov 重放测例数 | 260 |
+| 重放返回 0 | 104 |
+| 重放非零退出 | 156 |
+| 重放超时 | 0 |
+| GCC 源码文件数 | 1583 |
+| 源码行覆盖 | 298606/909439 (32.83%) |
+| 函数覆盖 | 38216/95267 (40.11%) |
+| 分支覆盖 | 224427/828708 (27.08%) |
+
+源码覆盖详细报告：`/Users/mac/work/loong-gcc-afl/out/source-coverage/instanllm-covered/gcc-source-coverage-report.md`。
+
+该口径只统计真实存在于 `src/gcc-upstream` 下的 GCC 源码文件，不把测试程序、系统头文件或 build 目录生成文件计入分母。非零退出测例仍保留在质量测试口径中，因为它们会覆盖 GCC 前端、诊断和 include 搜索等路径；返回 0 单独列出用于说明 corpus 可编译比例。
 
 ## 语言与 oracle 分布
 
@@ -348,4 +363,4 @@
 
 - 当前 evaluator 直接复用 `scripts/afl-showmap-gcc.sh`，因此只对 C/C++ 调用 `cc1`/`cc1plus` 形成覆盖数据。
 - Fortran/Ada/D/asm/RTL/shell/COBOL ready groups 并非无效，而是需要对应前端或专用 harness：例如 `f951`、GNAT、D frontend、assembler scan、RTL dump/compile pass 或 shell-driven multi-file harness。
-- C/C++ ready groups 已完成全量 InstanLLM + AFL edge 评估。下一阶段应补源码行/函数覆盖重放、细化 oracle，并为 assembly-scan、diagnostic、Fortran/asm/RTL 分别实现 evaluator。
+- C/C++ ready groups 已完成全量 InstanLLM + AFL edge 评估，并已接入 gcov 源码行/函数覆盖重放。下一阶段应细化 oracle，并为 assembly-scan、diagnostic、Fortran/asm/RTL 分别实现 evaluator。

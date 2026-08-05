@@ -27,6 +27,7 @@ venv/
 build/
 install/
 install-afl/
+install-gcov/
 
 # Generated runtime output. Curated, reviewable artifacts belong under data/.
 out/
