@@ -12,6 +12,7 @@ scripts/                   GCC/AFL++ build, fuzzing, showmap, and report helpers
 gcc-bugzilla-loongarch/    Bugzilla collection and archive tooling
 extract-llm/               Bug report to feature extraction pipeline
 group-llm/                 Feature grouping pipeline for later PoC generation
+instan-llm/                Feature-group instantiation and AFL++ coverage evaluation
 data/curated/              Small, reviewed, reproducible pipeline state snapshots
 seeds/                     Small C seed corpus
 seeds-cxx/                 Small C++ seed corpus
@@ -35,6 +36,8 @@ Their exact revisions are recorded by the submodule gitlinks and summarized in `
 ## Current Pipeline State
 
 The current GroupLLM state is documented in `group-llm/WORKING_CONTEXT.md`. Curated machine-readable snapshots are kept under `data/curated/group-llm/`; raw responses and run outputs remain under ignored `group-llm/out/`.
+
+`instan-llm/` is the next stage. It reads ready GroupLLM records, asks InstanLLM to generate complete test programs, then evaluates C/C++ programs with the AFL++ wrapped GCC frontend and records edge coverage before admitting a program into the covered corpus.
 
 ## Local Environment
 

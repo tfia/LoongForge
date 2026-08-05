@@ -32,6 +32,7 @@ install-afl/
 out/
 extract-llm/out/
 group-llm/out/
+instan-llm/out/
 
 # Local crawled/generated archives; keep manifests or curated exports under data/.
 gcc-bugzilla-loongarch/archive/

@@ -5,6 +5,8 @@
 
 仓库名：`loongforge`。当前已将上述工作目录初始化为单仓库 monorepo，但保留原目录名，避免破坏已有脚本和历史报告中的绝对路径。GCC 和 binutils-gdb 源码不直接提交到 monorepo，而是以 `src/gcc-upstream`、`src/binutils-gdb` 两个 Git submodule 锁定版本；具体 commit 见顶层 `third_party/SOURCES.lock`。构建目录、安装目录、AFL 输出、LLM raw outputs 和 `.env` 均由 `.gitignore` 排除，只有代码、文档、脚本、种子和 curated 状态快照进入版本管理。
 
+当前 LLM 管线已扩展为 ExtractLLM -> GroupLLM -> InstanLLM。新增 `instan-llm/` 模块负责读取 GroupLLM 的 ready feature groups，生成完整编译器测试程序，并用 AFL++ wrapped GCC 前端编译记录 edge coverage。只有成功产生非空 coverage map 的 C/C++ 程序会进入 `instan-llm/out/corpus/covered/`，作为后续 CI corpus 候选。
+
 ## 一、工作定位与阶段结论
 
 本工作的目标是为团队自有 fork 的 GCC 建立覆盖引导的持续质量测试能力，通过自动生成和变异 C/C++ 输入，尽早发现 ICE、崩溃、编译超时、优化器缺陷及覆盖率回退。
