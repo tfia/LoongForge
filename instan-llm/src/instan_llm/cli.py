@@ -17,6 +17,7 @@ from .pipeline import (
     PipelineError,
     build_corpus,
     evaluate_instantiations,
+    generate_coverage_report,
     project_root,
     run_synthesis,
     verify_outputs,
@@ -72,6 +73,15 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--output-dir", type=Path, default=project_root() / DEFAULT_OUTPUT_DIR)
     build.add_argument("--corpus-dir", type=Path, default=None)
 
+    report = subparsers.add_parser("report", help="write a Markdown InstanLLM coverage report")
+    report.add_argument("--output-dir", type=Path, default=project_root() / DEFAULT_OUTPUT_DIR)
+    report.add_argument(
+        "--groups-file",
+        type=Path,
+        default=(project_root() / DEFAULT_GROUPS_FILE).resolve(),
+    )
+    report.add_argument("--report-path", type=Path, default=None)
+
     verify = subparsers.add_parser("verify", help="verify instantiation and coverage outputs")
     verify.add_argument("--output-dir", type=Path, default=project_root() / DEFAULT_OUTPUT_DIR)
     verify.add_argument("--require-evaluations", action="store_true")
@@ -117,6 +127,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             manifest = build_corpus(args.output_dir, args.corpus_dir)
             print(json.dumps(manifest["counts"], ensure_ascii=False, indent=2, sort_keys=True))
             print(f"corpus: {manifest['corpus_dir']}")
+            return 0
+        if args.command == "report":
+            manifest = generate_coverage_report(args.output_dir, args.groups_file, args.report_path)
+            print(json.dumps(manifest["counts"], ensure_ascii=False, indent=2, sort_keys=True))
+            print(f"report: {manifest['report_path']}")
             return 0
         if args.command == "verify":
             result = verify_outputs(

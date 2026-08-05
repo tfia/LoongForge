@@ -83,6 +83,23 @@ PYTHONPATH=src python3 -m instan_llm build-corpus
 
 This copies only `evaluation_status=covered` programs into `out/corpus/covered/`.
 
+## Coverage Report
+
+```bash
+PYTHONPATH=src python3 -m instan_llm report \
+  --groups-file ../group-llm/out/feature-groups.jsonl \
+  --report-path ../docs/InstanLLM_阶段覆盖率报告.md
+```
+
+The report separates four different numbers:
+
+- GroupLLM ready groups available as InstanLLM input
+- ready groups selected for the current InstanLLM batch
+- generated programs that passed InstanLLM structural validation
+- generated programs that compiled through the AFL++ wrapped GCC frontend and produced non-empty edge coverage
+
+Current stage result on 2026-08-05: 24 selected C/C++ groups produced 24 ready instantiations and 24 AFL++ covered programs.
+
 ## Verify
 
 ```bash
@@ -93,3 +110,10 @@ PYTHONPATH=src python3 -m instan_llm verify --require-evaluations --min-covered 
 ## Current Limits
 
 The first evaluator supports C and C++ programs because the existing AFL wrapper targets `cc1` and `cc1plus`. InstanLLM may still record rejected or unsupported-language instantiations for Fortran, Ada, D, COBOL, asm, shell, or RTL groups. Those require future language-specific wrappers or harnesses before they can enter the covered corpus.
+
+This means the non-C/C++ groups are not considered invalid. They are waiting for a matching evaluator:
+
+- Fortran: call the Fortran frontend or driver with equivalent coverage replay.
+- asm: assemble/scan generated assembly or compile C that emits the target assembly condition.
+- RTL/diagnostic: run compiler-internal dump or diagnostic oracles instead of treating the test as a normal C translation unit.
+- Ada/D/COBOL/shell: add language-specific frontend or multi-file harness support before admitting outputs into the covered corpus.

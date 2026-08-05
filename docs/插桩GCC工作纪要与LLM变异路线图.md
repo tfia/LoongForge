@@ -7,6 +7,16 @@
 
 当前 LLM 管线已扩展为 ExtractLLM -> GroupLLM -> InstanLLM。新增 `instan-llm/` 模块负责读取 GroupLLM 的 ready feature groups，生成完整编译器测试程序，并用 AFL++ wrapped GCC 前端编译记录 edge coverage。只有成功产生非空 coverage map 的 C/C++ 程序会进入 `instan-llm/out/corpus/covered/`，作为后续 CI corpus 候选。
 
+2026-08-05 阶段验证结果：从 289 个 GroupLLM ready groups 中选择 24 个 C/C++ groups 做真实 LLM API 测试，InstanLLM 生成 24 个 ready 程序，AFL++ wrapped GCC 覆盖评估 24/24 covered。edge map 条目范围为 2631 到 84303，平均 17002.2。阶段覆盖报告已写入 `docs/InstanLLM_阶段覆盖率报告.md`。
+
+InstanLLM 后续 roadmap：
+
+1. 扩大 C/C++ 批量：从 24 个扩到全部 272 个 C/C++ ready groups，记录每轮 ready/covered/edge 分布，失败项进入可复现修复队列。
+2. 增强 oracle：区分 `compile_success`、`compile_failure`、`assembly_scan`、`runtime_exit` 和 `differential`，避免所有测试只按“能编译并有 edge”判定。
+3. 接入 corpus admission：只把 covered 且 oracle 合格的程序加入 CI corpus，并用 AFL edge 增量筛掉重复覆盖样例。
+4. 补齐专用 harness：为 assembly-scan、diagnostic、Fortran、asm、RTL、Ada/D/COBOL/shell 分别实现 evaluator。当前这些 GroupLLM ready groups 不是无效，而是不能直接用 `cc1/cc1plus` wrapper 评价。
+5. 回流组合策略：把 InstanLLM/evaluator 失败原因反馈给 GroupLLM 采样和 candidate-only backlog 分类，减少不可实例化组合。
+
 ## 一、工作定位与阶段结论
 
 本工作的目标是为团队自有 fork 的 GCC 建立覆盖引导的持续质量测试能力，通过自动生成和变异 C/C++ 输入，尽早发现 ICE、崩溃、编译超时、优化器缺陷及覆盖率回退。

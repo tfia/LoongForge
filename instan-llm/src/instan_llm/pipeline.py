@@ -991,6 +991,164 @@ def build_corpus(output_dir: Path, corpus_dir: Optional[Path] = None) -> Dict[st
     return manifest
 
 
+def markdown_table(headers: Sequence[str], rows: Sequence[Sequence[Any]]) -> str:
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join("---" for _ in headers) + " |",
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join(str(item) for item in row) + " |")
+    return "\n".join(lines)
+
+
+def generate_coverage_report(
+    output_dir: Path,
+    groups_file: Path,
+    report_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    output_dir = output_dir.resolve()
+    groups_file = groups_file.resolve()
+    if report_path is None:
+        report_path = output_dir / "INSTANLLM_COVERAGE_REPORT.md"
+    report_path = report_path.resolve()
+
+    groups = load_ready_groups(groups_file)
+    instantiations = load_instantiation_inventory(output_dir)
+    evaluations = load_evaluation_inventory(output_dir)
+    covered = [item for item in evaluations if item.get("evaluation_status") == "covered"]
+    edge_counts = [
+        int(item.get("coverage", {}).get("edge_map_entries") or 0)
+        for item in covered
+    ]
+    all_langs = Counter(canonical_language(group.get("language")) for group in groups)
+    selected_group_ids = {str(item.get("group_uid") or "") for item in instantiations}
+    selected_groups = [group for group in groups if str(group.get("group_uid") or "") in selected_group_ids]
+    selected_langs = Counter(canonical_language(group.get("language")) for group in selected_groups)
+    instantiation_statuses = Counter(str(item.get("instantiation_status")) for item in instantiations)
+    evaluation_statuses = Counter(str(item.get("evaluation_status")) for item in evaluations)
+    oracle_kinds = Counter(
+        str((item.get("oracle") or {}).get("kind") or "unknown") for item in instantiations
+    )
+    cxx_ready = sum(all_langs.get(language, 0) for language in ("c", "c++"))
+    unsupported_ready = len(groups) - cxx_ready
+
+    def percent(part: int, whole: int) -> str:
+        return "0.00%" if whole == 0 else f"{100.0 * part / whole:.2f}%"
+
+    edge_summary = {
+        "min": min(edge_counts) if edge_counts else 0,
+        "max": max(edge_counts) if edge_counts else 0,
+        "avg": round(sum(edge_counts) / len(edge_counts), 1) if edge_counts else 0,
+        "median": median(edge_counts),
+    }
+    rows = []
+    for evaluation in sorted(
+        evaluations,
+        key=lambda item: (str(item.get("candidate_id") or ""), str(item.get("instantiation_id") or "")),
+    ):
+        coverage = evaluation.get("coverage") or {}
+        rows.append(
+            [
+                evaluation.get("candidate_id"),
+                evaluation.get("language"),
+                evaluation.get("evaluation_status"),
+                coverage.get("edge_map_entries", 0),
+                Path(str(evaluation.get("source_path") or "")).name,
+            ]
+        )
+
+    content = [
+        "# InstanLLM 阶段覆盖率报告",
+        "",
+        f"生成时间：`{utc_now()}`",
+        "",
+        "测试范围：自有 LoongArch GCC fork 的编译器 CI 质量测试；不涉及网络安全测试。",
+        "",
+        "## 本轮结论",
+        "",
+        markdown_table(
+            ["指标", "数值"],
+            [
+                ["GroupLLM ready groups 总数", len(groups)],
+                ["当前 evaluator 可直接处理的 C/C++ ready groups", cxx_ready],
+                ["其他语言/专用 harness backlog", unsupported_ready],
+                ["本轮选择的 groups", len(selected_groups)],
+                ["InstanLLM ready", instantiation_statuses.get("ready", 0)],
+                ["AFL++ covered", evaluation_statuses.get("covered", 0)],
+                ["本轮 InstanLLM ready 率", percent(instantiation_statuses.get("ready", 0), len(instantiations))],
+                ["本轮 AFL covered 率", percent(evaluation_statuses.get("covered", 0), len(instantiations))],
+                ["本轮覆盖 GroupLLM ready 比例", percent(len(selected_groups), len(groups))],
+                ["本轮覆盖 C/C++ ready 比例", percent(len(selected_groups), cxx_ready)],
+            ],
+        ),
+        "",
+        "## AFL edge map 统计",
+        "",
+        markdown_table(
+            ["指标", "数值"],
+            [
+                ["covered programs", len(covered)],
+                ["最小 edge map 条目", edge_summary["min"]],
+                ["最大 edge map 条目", edge_summary["max"]],
+                ["平均 edge map 条目", edge_summary["avg"]],
+                ["中位 edge map 条目", edge_summary["median"]],
+            ],
+        ),
+        "",
+        "这些 edge map 条目来自 AFL++ instrumentation，不是 gcov 源码行覆盖率。它用于比较同一 wrapped GCC、同一前端和同一编译参数口径下的编译器路径覆盖趋势。",
+        "",
+        "## 语言与 oracle 分布",
+        "",
+        markdown_table(["语言", "GroupLLM ready", "本轮 InstanLLM"], sorted(
+            [[language, all_langs[language], selected_langs.get(language, 0)] for language in sorted(all_langs)]
+        )),
+        "",
+        markdown_table(["oracle kind", "数量"], sorted(oracle_kinds.items())),
+        "",
+        "## 本轮程序明细",
+        "",
+        markdown_table(["candidate", "language", "status", "edge entries", "source"], rows),
+        "",
+        "## 当前边界与后续工作",
+        "",
+        "- 当前 evaluator 直接复用 `scripts/afl-showmap-gcc.sh`，因此只对 C/C++ 调用 `cc1`/`cc1plus` 形成覆盖数据。",
+        "- Fortran/Ada/D/asm/RTL/shell/COBOL ready groups 并非无效，而是需要对应前端或专用 harness：例如 `f951`、GNAT、D frontend、assembler scan、RTL dump/compile pass 或 shell-driven multi-file harness。",
+        "- 下一阶段应优先扩大 C/C++ 批量规模，随后为 assembly-scan、diagnostic、Fortran/asm/RTL 分别实现 evaluator，并保持报告中的语言分布口径。",
+        "",
+    ]
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text("\n".join(content), encoding="utf-8")
+    manifest = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": utc_now(),
+        "report_path": str(report_path),
+        "groups_file": str(groups_file),
+        "output_dir": str(output_dir),
+        "counts": {
+            "ready_groups_total": len(groups),
+            "c_cpp_ready_groups": cxx_ready,
+            "non_c_cpp_ready_groups": unsupported_ready,
+            "selected_groups": len(selected_groups),
+            "instantiations": len(instantiations),
+            "evaluations": len(evaluations),
+            "covered": len(covered),
+        },
+        "edge_summary": edge_summary,
+    }
+    write_json(output_dir / "coverage-report-manifest.json", manifest)
+    return manifest
+
+
+def median(values: Sequence[int]) -> float:
+    if not values:
+        return 0
+    ordered = sorted(values)
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2:
+        return float(ordered[midpoint])
+    return round((ordered[midpoint - 1] + ordered[midpoint]) / 2.0, 1)
+
+
 def verify_outputs(
     output_dir: Path,
     require_evaluations: bool = False,

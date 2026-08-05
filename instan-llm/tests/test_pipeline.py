@@ -9,6 +9,7 @@ from instan_llm.pipeline import (
     build_corpus,
     build_messages,
     evaluate_instantiations,
+    generate_coverage_report,
     instantiation_output_path,
     load_env_file,
     normalize_instantiation_output,
@@ -265,6 +266,11 @@ class PipelineTests(unittest.TestCase):
             verify_outputs(output, require_evaluations=True, min_covered=1)
             corpus = build_corpus(output)
             self.assertEqual(corpus["counts"]["copied"], 1)
+            groups_file = root / "groups.jsonl"
+            write_jsonl(groups_file, [group])
+            report = generate_coverage_report(output, groups_file)
+            self.assertEqual(report["counts"]["covered"], 1)
+            self.assertIn("InstanLLM 阶段覆盖率报告", Path(report["report_path"]).read_text(encoding="utf-8"))
 
     def test_evaluate_skips_unsupported_language(self):
         group = ready_group(language="fortran")

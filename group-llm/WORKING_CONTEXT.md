@@ -130,4 +130,6 @@ LoongForge monorepo 已在 `/Users/mac/work/loong-gcc-afl` 初始化，但目录
 
 Git 不跟踪 `group-llm/out/` 的完整运行目录。后续 session 应以本文、上述 manifest，以及顶层 `data/curated/group-llm/` 中的可审计快照为事实来源，不依赖聊天记录里的中间数字。
 
-InstanLLM 阶段已作为 `instan-llm/` 模块接入：读取 `group-llm/out/feature-groups.jsonl` 的 ready records，生成完整测试程序，再通过 `scripts/afl-showmap-gcc.sh` 调用 AFL++ wrapped GCC 前端记录 edge coverage。当前 evaluator 支持 C/C++，其他语言的 ready groups 会保留为待专用 harness 处理。下一阶段的重点是针对 175 个 candidate-only features 的冲突类别设计专用分流/组合策略，以及让 InstanLLM 生成可编译 PoC 并以真实 GCC/AFL++ 覆盖反馈驱动迭代。
+InstanLLM 阶段已作为 `instan-llm/` 模块接入：读取 `group-llm/out/feature-groups.jsonl` 的 ready records，生成完整测试程序，再通过 `scripts/afl-showmap-gcc.sh` 调用 AFL++ wrapped GCC 前端记录 edge coverage。2026-08-05 已完成首轮真实 LLM/API 阶段测试：24 个 C/C++ groups 生成 24 个 ready instantiations，AFL++ evaluation 24/24 covered，edge map 条目范围为 2631 到 84303。阶段报告见顶层 `docs/InstanLLM_阶段覆盖率报告.md`。
+
+当前 evaluator 支持 C/C++，其他语言的 ready groups 不是无效结果，而是需要专用 harness 后才能用同口径纳入 covered corpus。下一阶段路线：先扩大 C/C++ InstanLLM 批量和 coverage trend 统计，再补 assembly-scan/diagnostic evaluator，随后实现 Fortran/asm/RTL 等专用 harness；并继续针对 175 个 candidate-only features 的冲突类别设计分流/组合策略。
