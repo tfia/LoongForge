@@ -23,6 +23,7 @@ from .pipeline import (
     DEFAULT_TIMEOUT,
     PipelineError,
     build_group_pool,
+    build_afl_feedback,
     prepare_candidates,
     project_root,
     run_synthesis,
@@ -78,6 +79,15 @@ def build_parser() -> argparse.ArgumentParser:
             "prioritizes features absent from validated ready groups"
         ),
     )
+    prepare.add_argument(
+        "--feedback-rewards",
+        type=Path,
+        default=None,
+        help=(
+            "optional AFL feature reward JSONL. If omitted, prepare auto-uses "
+            "OUTPUT_DIR/afl-feedback/feature-afl-rewards.jsonl when it exists"
+        ),
+    )
 
     run = subparsers.add_parser("run", help="call the configured DeepSeek model for each candidate")
     run.add_argument("--output-dir", type=Path, default=project_root() / DEFAULT_OUTPUT_DIR)
@@ -104,6 +114,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     build.add_argument("--output-dir", type=Path, default=project_root() / DEFAULT_OUTPUT_DIR)
 
+    feedback = subparsers.add_parser(
+        "feedback", help="build AFL edge feedback rewards from InstanLLM evaluations"
+    )
+    feedback.add_argument("--output-dir", type=Path, default=project_root() / DEFAULT_OUTPUT_DIR)
+    feedback.add_argument(
+        "--instan-output-dir",
+        type=Path,
+        default=(project_root().parent / "instan-llm" / "out").resolve(),
+    )
+    feedback.add_argument("--feedback-dir", type=Path, default=None)
+
     verify = subparsers.add_parser("verify", help="verify candidates, outputs, and ready-group pool")
     verify.add_argument("--output-dir", type=Path, default=project_root() / DEFAULT_OUTPUT_DIR)
     verify.add_argument("--require-outputs", action="store_true")
@@ -128,6 +149,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 min_confidence=args.min_confidence,
                 append_groups=args.append_groups,
                 coverage_basis=args.coverage_basis,
+                feedback_rewards_path=args.feedback_rewards,
             )
             print(json.dumps(manifest["counts"], ensure_ascii=False, indent=2, sort_keys=True))
             print(f"candidates: {Path(manifest['candidates_file']).resolve()}")
@@ -155,6 +177,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             manifest = build_group_pool(args.output_dir)
             print(json.dumps(manifest["counts"], ensure_ascii=False, indent=2, sort_keys=True))
             print(f"feature groups: {args.output_dir.resolve() / 'feature-groups.jsonl'}")
+            return 0
+        if args.command == "feedback":
+            manifest = build_afl_feedback(
+                group_output_dir=args.output_dir,
+                instan_output_dir=args.instan_output_dir,
+                feedback_dir=args.feedback_dir,
+            )
+            print(json.dumps(manifest["counts"], ensure_ascii=False, indent=2, sort_keys=True))
+            print(f"feedback: {Path(manifest['feedback_dir']).resolve()}")
             return 0
         if args.command == "verify":
             result = verify_outputs(

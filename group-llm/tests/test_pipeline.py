@@ -5,10 +5,12 @@ from pathlib import Path
 
 from group_llm.pipeline import (
     GroupValidationError,
+    build_afl_feedback,
     build_group_pool,
     build_messages,
     candidate_output_path,
     chat_endpoint,
+    pair_affinity,
     load_env_file,
     normalize_group_output,
     options_compatible,
@@ -159,6 +161,23 @@ class PipelineTests(unittest.TestCase):
         vector["feature"]["target_options"] = ["-mabi=lp64d", "-mlasx"]
         self.assertFalse(options_compatible(soft, vector))
 
+    def test_required_architecture_and_test_mode_conflicts_are_filtered(self):
+        loong = pool_record(40)
+        loong["feature"]["description"] = "LoongArch-specific missed optimization."
+        loong["feature"]["target_options"] = ["-march=loongarch64", "-O2"]
+        x86 = pool_record(41)
+        x86["feature"]["description"] = "x86-64 target GOTPCREL assembly check."
+        x86["feature"]["target_options"] = ["-m32", "-mfpmath=387"]
+        self.assertLess(pair_affinity(loong, x86)["score"], -999)
+
+        diagnostic = pool_record(42)
+        diagnostic["feature"]["failure_mode"] = "rejects-valid"
+        diagnostic["feature"]["description"] = "Must emit a diagnostic error message."
+        runtime = pool_record(43)
+        runtime["feature"]["failure_mode"] = "wrong-code"
+        runtime["feature"]["description"] = "Runtime wrong-code differential test."
+        self.assertLess(pair_affinity(diagnostic, runtime)["score"], -999)
+
     def test_prepare_can_append_without_replacing_existing_candidates(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -280,6 +299,55 @@ class PipelineTests(unittest.TestCase):
             )
             self.assertEqual(manifest["counts"]["ready_groups"], 1)
             self.assertEqual(result["counts"]["consolidated_ready_groups"], 1)
+
+    def test_afl_feedback_rewards_features_and_prepare_consumes_it(self):
+        candidate = self.candidate()
+        group = self.normalized(candidate)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            group_output = root / "group-out"
+            instan_output = root / "instan-out"
+            write_jsonl(group_output / "group-candidates.jsonl", [candidate])
+            write_jsonl(group_output / "feature-groups.jsonl", [group])
+            coverage_dir = instan_output / "coverage"
+            coverage_dir.mkdir(parents=True)
+            map_path = coverage_dir / f"{candidate['candidate_id']}.map"
+            map_path.write_text("1:1\n2:1\n3:1\n", encoding="utf-8")
+            write_jsonl(
+                instan_output / "evaluations.jsonl",
+                [
+                    {
+                        "evaluation_status": "covered",
+                        "candidate_id": candidate["candidate_id"],
+                        "group_uid": group["group_uid"],
+                        "instantiation_id": "inst-1",
+                        "language": "c",
+                        "coverage": {"map_path": str(map_path), "edge_map_entries": 3},
+                    }
+                ],
+            )
+            manifest = build_afl_feedback(group_output, instan_output)
+            self.assertEqual(manifest["counts"]["union_edges"], 3)
+            self.assertEqual(manifest["counts"]["rewarded_source_features"], len(candidate["source_feature_uids"]))
+            rewards = [
+                json.loads(line)
+                for line in (group_output / "afl-feedback" / "feature-afl-rewards.jsonl").read_text().splitlines()
+            ]
+            self.assertTrue(all(item["reward_score"] > 0 for item in rewards))
+
+            pool_path = root / "feature-pool.jsonl"
+            write_jsonl(pool_path, self.pool)
+            prepared = prepare_candidates(
+                pool_path,
+                group_output,
+                min_features=3,
+                max_features=3,
+                seed=13,
+                append_groups=1,
+            )
+            self.assertEqual(prepared["configuration"]["feedback_rewarded_features"], len(rewards))
+            new_candidate = json.loads((group_output / "group-candidates.jsonl").read_text().splitlines()[-1])
+            self.assertIn("coverage_feedback", new_candidate)
 
     def test_resumed_run_manifest_reports_full_inventory(self):
         candidate = self.candidate()

@@ -1108,6 +1108,7 @@ def generate_coverage_report(
     source_replay_counts = source_coverage.get("replay_counts") or {}
     ready_count = instantiation_statuses.get("ready", 0)
     covered_count = evaluation_statuses.get("covered", 0)
+    source_coverage_current = bool(source_totals) and int(source_replay_counts.get("selected") or 0) == covered_count
     rows = []
     seen_edges = set()
     for evaluation in sorted(
@@ -1164,7 +1165,11 @@ def generate_coverage_report(
         "",
         "## 结果解读",
         "",
-        f"- 当前 C/C++ 可测范围已经全量进入 InstanLLM：{len(selected_groups)}/{cxx_ready} 个 C/C++ ready groups 被选择并评估，不再是小样本抽测。",
+        (
+            f"- 当前 C/C++ 可测范围已经全量进入 InstanLLM：{len(selected_groups)}/{cxx_ready} 个 C/C++ ready groups 被选择并评估，不再是小样本抽测。"
+            if len(selected_groups) == cxx_ready
+            else f"- 当前已有 {len(selected_groups)}/{cxx_ready} 个 C/C++ ready groups 进入 InstanLLM 并完成评估；剩余 C/C++ ready groups 是新增 GroupLLM 输出或后续专用 harness 队列。"
+        ),
         f"- {covered_count}/{ready_count} 个 InstanLLM ready 程序均产生非空 AFL edge map，说明这些测例可以稳定驱动被测 GCC 前端执行，适合作为 CI corpus 候选。",
         f"- 未进入 covered 的 {len(selected_groups) - covered_count} 个 C/C++ group 停在 InstanLLM 生成阶段，其中 rejected {instantiation_statuses.get('rejected', 0)} 个、error {instantiation_statuses.get('error', 0)} 个；这不是 AFL/GCC 覆盖失败，应进入提示词、schema 或模型重试策略的修复队列。",
         f"- 本轮 union edge 为 {edge_summary['union']}，可作为后续 corpus admission 和趋势回归基线；单测例 `新增 edge` 为 0 的程序不一定无价值，但在入库优先级上应低于能增加 union edge 或具备强 oracle 的程序。",
@@ -1172,6 +1177,8 @@ def generate_coverage_report(
             f"- 已用同一批 covered corpus 重放 gcov 口径 GCC：源码行覆盖 {source_totals.get('lines_covered', 0)}/{source_totals.get('lines_total', 0)} "
             f"({source_totals.get('line_coverage_percent', 0):.2f}%)，函数覆盖 {source_totals.get('functions_covered', 0)}/{source_totals.get('functions_total', 0)} "
             f"({source_totals.get('function_coverage_percent', 0):.2f}%)。"
+            if source_coverage_current
+            else f"- gcov 源码覆盖率快照仍对应 {source_replay_counts.get('selected', 0)} 个历史 covered corpus；当前 AFL covered 已为 {covered_count}，源码覆盖率需按需重放后再更新。"
             if source_totals
             else "- 当前报告仍是 AFL edge 覆盖口径。若质量汇报需要“GCC 源码行/函数覆盖率”，需要用同一 corpus 重放一个 gcov/llvm-cov 口径的 GCC 构建，两个指标并列呈现。"
         ),
@@ -1193,7 +1200,7 @@ def generate_coverage_report(
         "这些 edge map 条目来自 AFL++ instrumentation，不是 gcov 源码行覆盖率。`edge entries` 是单个测例触发的控制流边数量，`union edge` 是本轮所有 covered 测例触发的去重边集合。`union 占比` 表示某个测例单独覆盖了本轮 union edge 的多少；`新增 edge` 表示按表格顺序加入 corpus 时该测例带来的新增去重边数。",
         "",
     ]
-    if source_totals:
+    if source_totals and source_coverage_current:
         content.extend(
             [
                 "## GCC 源码行/函数覆盖率",
@@ -1230,7 +1237,12 @@ def generate_coverage_report(
     else:
         content.extend(
             [
-                "如果要回答“覆盖了 GCC 源码多少行/函数”，需要额外构建带源码覆盖插桩的 GCC（例如 gcov/llvm-cov 口径）并在同一批测例上重放。当前报告先给出 AFL++ edge 覆盖，这是 fuzz/CI 入库筛选的直接反馈指标。",
+                (
+                    f"当前已有 gcov 源码覆盖快照，但它对应 {source_replay_counts.get('selected', 0)} 个历史 covered corpus；当前 AFL covered 为 {covered_count}。"
+                    "本轮优先评估 AFL feedback，不更新 gcov 汇报口径。"
+                    if source_totals
+                    else "如果要回答“覆盖了 GCC 源码多少行/函数”，需要额外构建带源码覆盖插桩的 GCC（例如 gcov/llvm-cov 口径）并在同一批测例上重放。当前报告先给出 AFL++ edge 覆盖，这是 fuzz/CI 入库筛选的直接反馈指标。"
+                ),
                 "",
             ]
         )

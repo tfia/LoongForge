@@ -178,3 +178,17 @@ ready groups 的语言分布：243 个 C、29 个 C++、6 个 Fortran、5 个 as
 5. 用已有 AFL++ coverage wrapper 测量增量覆盖；
 6. 只有带来新增覆盖的 group 才进入优先队列，其 glue feature 才具备回灌 feature pool 的资格；
 7. ICE、超时、wrong-code 和异常诊断都作为编译器质量缺陷信号记录，不做安全影响推断。
+
+## AFL edge 反馈闭环
+
+已接入论文式 coverage-guided feedback 的第一版实现：
+
+```bash
+PYTHONPATH=src python3 -m group_llm feedback \
+  --output-dir out \
+  --instan-output-dir ../instan-llm/out
+```
+
+该命令读取 InstanLLM 的 AFL edge maps，计算每个 ready group 对 union edge 的增量贡献，并把 reward 拆分到 source features。输出位于 `out/afl-feedback/`，其中 `feature-afl-rewards.jsonl` 会被后续 `prepare` 自动读取，用于提高高价值 feature 在下一轮组合中的采样概率。
+
+当前 feedback 只服务 LoongArch C/C++ AFL harness，不会把其他 target 架构或专用前端 feature 全局混入。真实小批测试中，加入 required target arch 与 test-mode hard gate 后，GroupLLM rejected 率从 91.67% 降到 25.00%；9 个新 ready groups 经 InstanLLM 后全部 AFL covered，并新增 1,156 条 union edge。阶段评估见 `../docs/AFL反馈闭环阶段评估.md`。

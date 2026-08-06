@@ -107,12 +107,15 @@ PROFILE_TERMS = {
 }
 ARCH_TERMS = {
     "loongarch": {"loongarch", "loongarch64", "loong64", "la64", "lsx", "lasx"},
-    "x86": {"x86", "i386", "i686", "x86_64", "avx", "sse"},
-    "arm": {"arm", "aarch64", "neon", "sve"},
+    "x86": {"x86", "x86-64", "i386", "i686", "x86_64", "avx", "avx512", "avx512f", "sse", "zmm"},
+    "arm": {"arm", "arm64", "aarch64", "neon", "sve"},
+    "alpha": {"alpha", "ev4", "ev5", "ev6"},
+    "m68k": {"m68k", "m68000", "68000"},
     "mips": {"mips", "mips64"},
-    "riscv": {"riscv", "risc-v", "rv64", "rv32"},
+    "riscv": {"riscv", "risc-v", "riscv64", "riscv32", "rv64", "rv32"},
     "powerpc": {"powerpc", "ppc", "ppc64", "altivec", "vsx"},
 }
+AFL_FEEDBACK_COMPATIBLE_LANGUAGES = {"c", "c++", "asm", "c-header", "other", "unknown"}
 
 
 class PipelineError(RuntimeError):
@@ -275,8 +278,10 @@ def architecture_set(record: Mapping[str, Any]) -> Set[str]:
     text = " ".join(
         [
             str(feature.get("description") or ""),
+            str(feature.get("code_witness") or ""),
             " ".join(string_list(feature.get("composition_tags"))),
             " ".join(string_list(feature.get("target_options"))),
+            str(record.get("root_cause_summary") or ""),
         ]
     ).lower()
     words = token_set(text)
@@ -284,6 +289,53 @@ def architecture_set(record: Mapping[str, Any]) -> Set[str]:
     for architecture, terms in ARCH_TERMS.items():
         if words.intersection(terms):
             result.add(architecture)
+    return result
+
+
+def required_architecture_set(record: Mapping[str, Any]) -> Set[str]:
+    """Infer architectures that are required, not merely mentioned."""
+
+    feature = feature_object(record)
+    text = " ".join(
+        [
+            " ".join(string_list(feature.get("target_options"))),
+            str(feature.get("code_witness") or ""),
+            str(feature.get("description") or ""),
+            str(record.get("root_cause_summary") or ""),
+        ]
+    ).lower()
+    result = set()
+    loong_terms = (
+        "-march=loongarch", "-mabi=lp64", "-mlsx", "-mlasx", "loongarch-specific",
+        "loongarch target", "loongarch backend", "loongarch psabi",
+    )
+    x86_terms = (
+        "-m32", "-m64", "-mavx", "-mavx512", "-mfpmath=387", "x87", "gotpcrel", "mxcsr",
+        "__builtin_ia32",
+        "x86-specific", "x86 target", "x86-64 target",
+    )
+    arm_terms = ("-march=arm", "-march=armv", "-march=aarch64", "aarch64 target", "aarch64-specific")
+    m68k_terms = ("-mcpu=68000", "-m68000", "m68k target", "m68k-specific")
+    alpha_terms = ("-mcpu=ev4", "-mcpu=ev5", "-mcpu=ev6", "alpha target", "alpha-specific")
+    powerpc_terms = ("-mcpu=power", "-mpowerpc", "powerpc target", "powerpc-specific")
+    riscv_terms = (
+        "-march=rv", "riscv target", "risc-v target", "riscv-specific", "risc-v-specific",
+        "on riscv", "on risc-v", "riscv64",
+    )
+    if any(term in text for term in loong_terms):
+        result.add("loongarch")
+    if any(term in text for term in x86_terms):
+        result.add("x86")
+    if any(term in text for term in arm_terms):
+        result.add("arm")
+    if any(term in text for term in m68k_terms):
+        result.add("m68k")
+    if any(term in text for term in alpha_terms):
+        result.add("alpha")
+    if any(term in text for term in powerpc_terms):
+        result.add("powerpc")
+    if any(term in text for term in riscv_terms):
+        result.add("riscv")
     return result
 
 
@@ -303,6 +355,42 @@ def matches_profile(record: Mapping[str, Any], target_profile: str) -> bool:
         ]
     )
     return bool(token_set(searchable).intersection(terms))
+
+
+def feedback_iteration_compatible(record: Mapping[str, Any], target_profile: str) -> bool:
+    """Return whether a source feature belongs in the current AFL feedback loop.
+
+    The current evaluator feeds C/C++ translation units through AFL-instrumented
+    cc1/cc1plus for the LoongArch GCC fork.  Feedback from that loop should not
+    globally promote features that require unrelated frontends or target
+    architectures; those belong to later dedicated harnesses.
+    """
+
+    if record_language(record) not in AFL_FEEDBACK_COMPATIBLE_LANGUAGES:
+        return False
+    text = " ".join(
+        [
+            str(feature_object(record).get("description") or ""),
+            str(feature_object(record).get("code_witness") or ""),
+            str(record.get("root_cause_summary") or ""),
+        ]
+    ).lower()
+    if any(term in text for term in ("gccgo", "libgo", "go frontend", ".go source")):
+        return False
+    if "unsupported-target" in text or ("fixed-point" in text and "unsupported target" in text):
+        return False
+    if any(term in text for term in ("__builtin_ia32", "mxcsr", "dlopen", "-shared", "-pthread")):
+        return False
+    profile = target_profile.strip().lower()
+    if not profile or profile == "any":
+        return True
+    required_architectures = required_architecture_set(record)
+    if required_architectures and profile in ARCH_TERMS:
+        return required_architectures == {profile}
+    architectures = architecture_set(record)
+    if not required_architectures and architectures and profile in ARCH_TERMS and profile not in architectures:
+        return False
+    return True
 
 
 def feature_quality(record: Mapping[str, Any]) -> float:
@@ -325,9 +413,49 @@ def languages_compatible(left: Mapping[str, Any], right: Mapping[str, Any]) -> b
 
 
 def architectures_compatible(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
-    a = architecture_set(left)
-    b = architecture_set(right)
+    required_a = required_architecture_set(left)
+    required_b = required_architecture_set(right)
+    if required_a and required_b:
+        return bool(required_a.intersection(required_b))
+    a = required_a or architecture_set(left)
+    b = required_b or architecture_set(right)
+    if required_a and b:
+        return bool(required_a.intersection(b))
+    if required_b and a:
+        return bool(required_b.intersection(a))
     return not a or not b or bool(a.intersection(b))
+
+
+def test_mode_bucket(record: Mapping[str, Any]) -> str:
+    feature = feature_object(record)
+    text = " ".join(
+        [
+            str(feature.get("description") or ""),
+            str(feature.get("code_witness") or ""),
+            str(feature.get("feature_type") or ""),
+            str(feature.get("failure_mode") or ""),
+            " ".join(string_list(feature.get("composition_tags"))),
+            str(record.get("root_cause_summary") or ""),
+        ]
+    ).lower()
+    if any(term in text for term in ("linker", "link failure", "build-failure", "bootstrap", "configure")):
+        return "build_or_link"
+    if any(term in text for term in ("diagnostic", "rejects-valid", "reject-valid", "must reject", "error message")):
+        return "diagnostic"
+    if any(term in text for term in ("assembly scan", "scan assembly", "expected assembly", "instruction selection", "missed-optimization")):
+        return "assembly_or_compile"
+    if any(term in text for term in ("wrong-code", "runtime", "execute", "differential")):
+        return "execute_or_compile"
+    return "compile"
+
+
+def test_modes_compatible(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    a = test_mode_bucket(left)
+    b = test_mode_bucket(right)
+    if a == b:
+        return True
+    compatible = {"compile", "assembly_or_compile", "execute_or_compile"}
+    return a in compatible and b in compatible
 
 
 def option_constraints(record: Mapping[str, Any]) -> Dict[str, Any]:
@@ -379,6 +507,7 @@ def pair_affinity(left: Mapping[str, Any], right: Mapping[str, Any]) -> Dict[str
     compatible_language = languages_compatible(left, right)
     compatible_architecture = architectures_compatible(left, right)
     compatible_options = options_compatible(left, right)
+    compatible_test_mode = test_modes_compatible(left, right)
     left_feature = feature_object(left)
     right_feature = feature_object(right)
     left_tags = composition_tokens(left)
@@ -405,7 +534,7 @@ def pair_affinity(left: Mapping[str, Any], right: Mapping[str, Any]) -> Dict[str
         + (1.0 if same_profile else 0.0)
         + 0.6 * (feature_quality(left) + feature_quality(right))
     )
-    if not compatible_language or not compatible_architecture or not compatible_options:
+    if not compatible_language or not compatible_architecture or not compatible_options or not compatible_test_mode:
         score = -1000.0
     return {
         "left": feature_uid(left),
@@ -414,6 +543,7 @@ def pair_affinity(left: Mapping[str, Any], right: Mapping[str, Any]) -> Dict[str
         "language_compatible": compatible_language,
         "architecture_compatible": compatible_architecture,
         "options_compatible": compatible_options,
+        "test_mode_compatible": compatible_test_mode,
         "shared_tags": shared_tags,
         "same_compiler_area": same_area,
         "same_failure_mode": same_failure,
@@ -480,6 +610,195 @@ def source_snapshot(record: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+def read_edge_map(path: Path) -> Set[str]:
+    if not path.is_file():
+        return set()
+    edges: Set[str] = set()
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        # afl-showmap text output commonly starts with the edge id followed by
+        # a hit count.  Keep only the edge id so maps from different runs can be
+        # unioned and compared.
+        edges.add(line.split(":", 1)[0].split()[0])
+    return edges
+
+
+def edge_map_path(evaluation: Mapping[str, Any]) -> Path:
+    return Path(str((evaluation.get("coverage") or {}).get("map_path") or ""))
+
+
+def load_group_index(groups_file: Path) -> Dict[str, Dict[str, Any]]:
+    groups: Dict[str, Dict[str, Any]] = {}
+    if not groups_file.is_file():
+        return groups
+    for group in iter_jsonl(groups_file):
+        for key_name in ("group_uid", "candidate_id"):
+            key = str(group.get(key_name) or "")
+            if key:
+                groups[key] = group
+    return groups
+
+
+def build_afl_feedback(
+    group_output_dir: Path,
+    instan_output_dir: Path,
+    feedback_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Build AFL edge-coverage rewards for GroupLLM source-feature sampling."""
+
+    group_output_dir = group_output_dir.resolve()
+    instan_output_dir = instan_output_dir.resolve()
+    if feedback_dir is None:
+        feedback_dir = group_output_dir / "afl-feedback"
+    feedback_dir = feedback_dir.resolve()
+    groups_file = group_output_dir / "feature-groups.jsonl"
+    evaluations_file = instan_output_dir / "evaluations.jsonl"
+    if not groups_file.is_file():
+        raise PipelineError(f"feature groups file does not exist: {groups_file}")
+    if not evaluations_file.is_file():
+        raise PipelineError(f"InstanLLM evaluations file does not exist: {evaluations_file}")
+
+    groups = load_group_index(groups_file)
+    global_edges: Set[str] = set()
+    group_rows: List[Dict[str, Any]] = []
+    feature_buckets: Dict[str, Dict[str, Any]] = {}
+    glue_rows: List[Dict[str, Any]] = []
+    covered_count = 0
+
+    for evaluation_index, evaluation in enumerate(iter_jsonl(evaluations_file), start=1):
+        if evaluation.get("evaluation_status") != "covered":
+            continue
+        covered_count += 1
+        group = groups.get(str(evaluation.get("group_uid") or "")) or groups.get(str(evaluation.get("candidate_id") or ""))
+        if not group:
+            continue
+        edges = read_edge_map(edge_map_path(evaluation))
+        new_edges = edges - global_edges
+        global_edges.update(edges)
+        source_uids = [str(uid) for uid in group.get("source_feature_uids", []) if str(uid)]
+        reward_share = 0.0 if not source_uids else len(new_edges) / len(source_uids)
+        is_novel = bool(new_edges)
+        group_row = {
+            "schema_version": SCHEMA_VERSION,
+            "evaluation_index": evaluation_index,
+            "group_uid": group.get("group_uid"),
+            "candidate_id": group.get("candidate_id"),
+            "instantiation_id": evaluation.get("instantiation_id"),
+            "language": evaluation.get("language") or group.get("language"),
+            "edge_entries": len(edges),
+            "new_edges": len(new_edges),
+            "new_edge_ratio": 0.0 if not edges else round(len(new_edges) / len(edges), 6),
+            "union_edges_after": len(global_edges),
+            "source_feature_uids": source_uids,
+            "promote_new_glue": is_novel,
+            "map_path": str(edge_map_path(evaluation)),
+        }
+        group_rows.append(group_row)
+        for uid in source_uids:
+            bucket = feature_buckets.setdefault(
+                uid,
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "feature_uid": uid,
+                    "covered_group_count": 0,
+                    "novel_group_count": 0,
+                    "edge_entries_sum": 0,
+                    "new_edges_sum": 0.0,
+                    "max_group_new_edges": 0,
+                    "candidate_ids": [],
+                    "group_uids": [],
+                },
+            )
+            bucket["covered_group_count"] += 1
+            bucket["edge_entries_sum"] += len(edges)
+            bucket["new_edges_sum"] += reward_share
+            bucket["max_group_new_edges"] = max(bucket["max_group_new_edges"], len(new_edges))
+            bucket["candidate_ids"].append(str(group.get("candidate_id") or ""))
+            bucket["group_uids"].append(str(group.get("group_uid") or ""))
+            if is_novel:
+                bucket["novel_group_count"] += 1
+        if is_novel:
+            for glue in group.get("glue_features", []) or []:
+                if not isinstance(glue, dict):
+                    continue
+                glue_rows.append(
+                    {
+                        "schema_version": SCHEMA_VERSION,
+                        "group_uid": group.get("group_uid"),
+                        "candidate_id": group.get("candidate_id"),
+                        "glue_id": glue.get("glue_id"),
+                        "description": glue.get("description"),
+                        "semantic_role": glue.get("semantic_role"),
+                        "connects": glue.get("connects"),
+                        "composition_tags": glue.get("composition_tags"),
+                        "code_witness": glue.get("code_witness"),
+                        "new_edges": len(new_edges),
+                        "edge_entries": len(edges),
+                        "promotion_reason": "parent group produced AFL union-edge gain",
+                    }
+                )
+
+    feature_rows = []
+    for bucket in feature_buckets.values():
+        bucket["candidate_ids"] = sorted(set(bucket["candidate_ids"]))
+        bucket["group_uids"] = sorted(set(bucket["group_uids"]))
+        bucket["new_edges_sum"] = round(float(bucket["new_edges_sum"]), 3)
+        bucket["reward_score"] = round(
+            bucket["new_edges_sum"] + 25.0 * bucket["novel_group_count"] + 0.001 * bucket["edge_entries_sum"],
+            3,
+        )
+        feature_rows.append(bucket)
+    feature_rows.sort(key=lambda item: (-item["reward_score"], item["feature_uid"]))
+
+    feedback_dir.mkdir(parents=True, exist_ok=True)
+    write_jsonl(feedback_dir / "group-afl-feedback.jsonl", group_rows)
+    write_jsonl(feedback_dir / "feature-afl-rewards.jsonl", feature_rows)
+    write_jsonl(feedback_dir / "novel-glue-features.jsonl", glue_rows)
+    manifest = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": utc_now(),
+        "quality_scope": "compiler CI quality testing; not security testing",
+        "group_output_dir": str(group_output_dir),
+        "instan_output_dir": str(instan_output_dir),
+        "feedback_dir": str(feedback_dir),
+        "groups_file": str(groups_file),
+        "evaluations_file": str(evaluations_file),
+        "outputs": {
+            "group_feedback": str(feedback_dir / "group-afl-feedback.jsonl"),
+            "feature_rewards": str(feedback_dir / "feature-afl-rewards.jsonl"),
+            "novel_glue_features": str(feedback_dir / "novel-glue-features.jsonl"),
+        },
+        "counts": {
+            "covered_evaluations": covered_count,
+            "groups_with_feedback": len(group_rows),
+            "novel_groups": sum(1 for item in group_rows if item["new_edges"] > 0),
+            "rewarded_source_features": len(feature_rows),
+            "promoted_glue_features": len(glue_rows),
+            "union_edges": len(global_edges),
+        },
+        "policy": {
+            "source_feature_reward": "new AFL union edges are split equally across source features in the parent group",
+            "glue_promotion": "GroupLLM glue features are exported when their parent group adds AFL union edges",
+            "feedback_consumer": "prepare_candidates reads feature-afl-rewards.jsonl and biases future source-feature sampling",
+        },
+    }
+    write_json(feedback_dir / "afl-feedback-manifest.json", manifest)
+    return manifest
+
+
+def load_feature_rewards(path: Optional[Path]) -> Dict[str, Dict[str, Any]]:
+    if path is None or not path.is_file():
+        return {}
+    rewards: Dict[str, Dict[str, Any]] = {}
+    for item in iter_jsonl(path):
+        uid = str(item.get("feature_uid") or "")
+        if uid:
+            rewards[uid] = item
+    return rewards
+
+
 def choose_primary_language(records: Sequence[Mapping[str, Any]]) -> str:
     languages = [record_language(record) for record in records if record_language(record) != "unknown"]
     if not languages:
@@ -494,6 +813,7 @@ def candidate_selection_score(
     sampling_usage: Counter,
     type_counts: Counter,
     profile_match: bool,
+    feature_rewards: Optional[Mapping[str, Mapping[str, Any]]] = None,
 ) -> float:
     affinities = [pair_affinity(candidate, existing)["score"] for existing in selected]
     if not affinities or min(affinities) <= -999:
@@ -512,6 +832,8 @@ def candidate_selection_score(
     uncovered_bonus = 8.0 if planned_coverage[uid] == 0 else 0.0
     underuse = 2.0 / (1.0 + sampling_usage[uid])
     target_bonus = 1.4 if profile_match else 0.0
+    reward = (feature_rewards or {}).get(uid) or {}
+    feedback_bonus = min(8.0, float(reward.get("reward_score") or 0.0) / 8000.0)
     return (
         max(affinities)
         + 0.35 * (sum(affinities) / len(affinities))
@@ -519,6 +841,7 @@ def candidate_selection_score(
         + uncovered_bonus
         + underuse
         + target_bonus
+        + feedback_bonus
     )
 
 
@@ -533,20 +856,36 @@ def sample_candidate_groups(
     existing_candidates: Sequence[Mapping[str, Any]] = (),
     covered_feature_uids: Sequence[str] = (),
     existing_candidates_cover: bool = True,
+    feature_rewards: Optional[Mapping[str, Mapping[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     if group_count <= 0:
         raise PipelineError("group_count must be positive")
+    feature_rewards = feature_rewards or {}
+    feedback_mode = bool(feature_rewards)
     if min_features < 2 or max_features < min_features:
         raise PipelineError("feature group size must satisfy 2 <= min_features <= max_features")
     if len({feature_bug_id(record) for record in records}) < min_features:
         raise PipelineError("feature pool does not contain enough distinct bugs for one group")
 
+    candidate_universe = list(records)
+    if feedback_mode:
+        candidate_universe = [
+            record for record in records if feedback_iteration_compatible(record, target_profile)
+        ]
+        if len({feature_bug_id(record) for record in candidate_universe}) < min_features:
+            raise PipelineError("AFL feedback-compatible feature pool is too small for one group")
+
     rng = random.Random(seed)
     anchors = [
         record
-        for record in records
+        for record in candidate_universe
         if str(feature_object(record).get("feature_type") or "") in CORE_FEATURE_TYPES
         and matches_profile(record, target_profile)
+    ]
+    rewarded_anchors = [
+        record
+        for record in anchors
+        if feature_uid(record) in feature_rewards
     ]
     if not anchors:
         raise PipelineError(f"no core feature matches target profile {target_profile!r}")
@@ -582,13 +921,16 @@ def sample_candidate_groups(
         selected: Optional[List[Dict[str, Any]]] = None
         for _attempt in range(80):
             uncovered_records = [
-                item for item in records if planned_coverage[feature_uid(item)] == 0
+                item for item in candidate_universe if planned_coverage[feature_uid(item)] == 0
             ]
             # Tail-coverage pass: support features (failure oracles and mutation
             # knobs) may never be selected as normal anchors. Once the broad
             # pool has been sampled, seed a candidate with those uncovered
             # records and let compatible core/profile features bridge them.
-            coverage_window = uncovered_records or anchors
+            if feedback_mode and rewarded_anchors:
+                coverage_window = rewarded_anchors
+            else:
+                coverage_window = uncovered_records or anchors
             least_covered = min(planned_coverage[feature_uid(item)] for item in coverage_window)
             coverage_window = [
                 item for item in coverage_window if planned_coverage[feature_uid(item)] == least_covered
@@ -607,7 +949,7 @@ def sample_candidate_groups(
 
             while len(current) < desired_size:
                 ranked: List[Tuple[float, float, Dict[str, Any]]] = []
-                for candidate in records:
+                for candidate in candidate_universe:
                     uid = feature_uid(candidate)
                     if uid in {feature_uid(item) for item in current}:
                         continue
@@ -632,6 +974,7 @@ def sample_candidate_groups(
                         sampling_usage,
                         type_counts,
                         matches_profile(candidate, target_profile),
+                        feature_rewards,
                     )
                     if score <= -999:
                         continue
@@ -694,6 +1037,16 @@ def sample_candidate_groups(
         ]
         source_features = [source_snapshot(item) for item in selected]
         source_sha = stable_hash(source_features, length=64)
+        feedback_snapshot = [
+            {
+                "feature_uid": uid,
+                "reward_score": feature_rewards.get(uid, {}).get("reward_score", 0),
+                "new_edges_sum": feature_rewards.get(uid, {}).get("new_edges_sum", 0),
+                "novel_group_count": feature_rewards.get(uid, {}).get("novel_group_count", 0),
+            }
+            for uid in uids
+            if uid in feature_rewards
+        ]
         candidate_id = f"group-{group_index:04d}-{stable_hash({'seed': seed, 'uids': uids}, 12)}"
         groups.append(
             {
@@ -707,8 +1060,15 @@ def sample_candidate_groups(
                 "source_bug_ids": [feature_bug_id(item) for item in selected],
                 "source_features_sha256": source_sha,
                 "source_features": source_features,
+                "coverage_feedback": {
+                    "basis": "afl_union_edge_reward",
+                    "source_features": feedback_snapshot,
+                    "max_reward_score": max(
+                        [float(item.get("reward_score") or 0.0) for item in feedback_snapshot] or [0.0]
+                    ),
+                },
                 "sampling": {
-                    "algorithm": "incremental_uncovered_affinity_v2",
+                    "algorithm": "incremental_uncovered_affinity_feedback_v3" if feature_rewards else "incremental_uncovered_affinity_v2",
                     "seed": seed,
                     "group_index": group_index,
                     "requested_size_range": [min_features, max_features],
@@ -738,10 +1098,17 @@ def prepare_candidates(
     min_confidence: float = DEFAULT_MIN_CONFIDENCE,
     append_groups: int = 0,
     coverage_basis: str = "candidate",
+    feedback_rewards_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     feature_pool_path = feature_pool_path.resolve()
     output_dir = output_dir.resolve()
     records = load_feature_pool(feature_pool_path, allowed_languages, min_confidence)
+    if feedback_rewards_path is None:
+        default_feedback_path = output_dir / "afl-feedback" / "feature-afl-rewards.jsonl"
+        feedback_rewards_path = default_feedback_path if default_feedback_path.is_file() else None
+    elif not feedback_rewards_path.is_file():
+        raise PipelineError(f"feedback rewards file does not exist: {feedback_rewards_path}")
+    feature_rewards = load_feature_rewards(feedback_rewards_path)
     if append_groups < 0:
         raise PipelineError("append_groups cannot be negative")
     if coverage_basis not in {"candidate", "ready"}:
@@ -792,6 +1159,7 @@ def prepare_candidates(
         existing_candidates=existing_candidates,
         covered_feature_uids=covered_feature_uids,
         existing_candidates_cover=coverage_basis == "candidate",
+        feature_rewards=feature_rewards,
     )
     candidates = existing_candidates + new_candidates
     candidates_path = output_dir / "group-candidates.jsonl"
@@ -821,6 +1189,8 @@ def prepare_candidates(
             "target_profile": target_profile,
             "allowed_languages": list(allowed_languages),
             "min_confidence": min_confidence,
+            "feedback_rewards_path": str(feedback_rewards_path.resolve()) if feedback_rewards_path else "",
+            "feedback_rewarded_features": len(feature_rewards),
         },
         "counts": {
             "feature_pool_records": len(records),
@@ -836,6 +1206,7 @@ def prepare_candidates(
                 1 for record in records if matches_profile(record, target_profile)
             ),
             "ready_features_before_append": len(set(covered_feature_uids)),
+            "feedback_rewarded_features": len(feature_rewards),
         },
         "policy": {
             "source_features_are_immutable": True,
@@ -844,6 +1215,7 @@ def prepare_candidates(
             "api_key_persisted": False,
             "incremental_sampling_prioritizes_uncovered_ready_features": True,
             "coverage_basis": coverage_basis,
+            "afl_feedback_weighting": bool(feature_rewards),
         },
     }
     write_json(output_dir / "prepare-manifest.json", manifest)
@@ -940,7 +1312,7 @@ def build_messages(
         "Required JSON shape:\n"
         f"{json.dumps(output_contract, ensure_ascii=False, indent=2)}\n\n"
         "Candidate context:\n"
-        f"{json.dumps({'candidate_id': candidate['candidate_id'], 'target_profile': candidate.get('target_profile'), 'primary_language': candidate.get('primary_language'), 'sampling': candidate.get('sampling'), 'source_features': compact_features}, ensure_ascii=False, indent=2, sort_keys=True)}"
+        f"{json.dumps({'candidate_id': candidate['candidate_id'], 'target_profile': candidate.get('target_profile'), 'primary_language': candidate.get('primary_language'), 'sampling': candidate.get('sampling'), 'coverage_feedback': candidate.get('coverage_feedback'), 'source_features': compact_features}, ensure_ascii=False, indent=2, sort_keys=True)}"
     )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 

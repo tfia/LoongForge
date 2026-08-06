@@ -11,15 +11,16 @@
 
 随后已单独构建 gcov 口径 GCC，并用同一批 260 个 covered corpus 重放，开始回答“覆盖了多少 GCC 源码行/函数”的质量汇报问题。当前源码覆盖口径只统计真实存在于 `src/gcc-upstream` 下的 GCC 源码文件，不把测试程序、系统头文件或 build 目录生成文件计入分母；结果为源码行覆盖 298,606/909,439（32.83%）、函数覆盖 38,216/95,267（40.11%）、分支覆盖 224,427/828,708（27.08%）。260 条测例均已执行，其中 104 条返回 0、156 条非零退出；非零退出多来自缺少外部头文件或负向测试，但仍会覆盖 GCC 前端、诊断和 include 搜索路径，因此保留在质量测试覆盖口径中。
 
+2026-08-06 已接入论文式 AFL edge 反馈闭环：GroupLLM 可读取 InstanLLM 的 AFL maps，计算每个 group 对 union edge 的新增贡献，并把 reward 分配给 source features，用于下一轮 feature 选取和组合。第一版全局 reward 加权导致跨 target/language/test-mode 混组，真实小批 rejected 率为 91.67%；加入 LoongArch C/C++ AFL harness 兼容池、required target arch hard gate 和 test-mode hard gate 后，真实小批 rejected 率降到 25.00%。修复后的 9 个新 ready groups 经 InstanLLM 全部生成 ready 且 AFL covered，将 covered corpus 从 260 扩到 269，union edge 从 261,917 提升到 263,073（+1,156）。阶段评估见 `docs/AFL反馈闭环阶段评估.md`。
+
 InstanLLM 后续 roadmap：
 
-1. 固化 C/C++ 全量批次：保留当前 260 个 covered 程序作为 CI corpus 候选，并把 10 个 rejected、2 个 error 作为可复现的 InstanLLM 修复队列。
+1. 固化 AFL feedback-guided C/C++ 迭代：保留当前 269 个 covered 程序作为 CI corpus 候选，并继续以新增 union edge 作为入库优先级。
 2. 增强 oracle：区分 `compile_success`、`compile_failure`、`assembly_scan`、`runtime_exit` 和 `differential`，避免所有测试只按“能编译并有 edge”判定。
-3. 固化源码覆盖重放：保留 gcov 口径 GCC 构建和 `scripts/gcc-source-coverage-replay.py`，在 CI 中用同一 covered corpus 同时输出 AFL edge 和 GCC 源码行/函数覆盖。
-4. 提升可编译比例：补齐高频缺失头文件依赖或改写 InstanLLM prompt，降低 `ffi.h` 等外部依赖导致的非零退出，提升源码覆盖统计中的返回 0 比例。
-5. 接入 corpus admission：只把 covered 且 oracle 合格、或能带来新增 union edge/源码覆盖增量的程序加入 CI corpus，重复覆盖样例降级为备选语料。
-6. 补齐专用 harness：为 assembly-scan、diagnostic、Fortran、asm、RTL、Ada/D/COBOL/shell 分别实现 evaluator。当前这些 GroupLLM ready groups 不是无效，而是不能直接用 `cc1/cc1plus` wrapper 评价。
-7. 回流组合策略：把 InstanLLM/evaluator 失败原因反馈给 GroupLLM 采样和 candidate-only backlog 分类，减少不可实例化组合。
+3. 继续降低 GroupLLM rejected 率：把 rejected 原因沉淀成本地 required target arch、test-mode、frontend/harness hard gate，减少无效 LLM 调用。
+4. 接入 corpus admission：只把 covered 且 oracle 合格、或能带来新增 union edge 的程序加入 CI corpus，重复覆盖样例降级为备选语料。
+5. 补齐专用 harness：为 assembly-scan、diagnostic、Fortran、asm、RTL、Ada/D/COBOL/shell 分别实现 evaluator。当前这些 GroupLLM ready groups 不是无效，而是不能直接用 `cc1/cc1plus` wrapper 评价。
+6. 保留 gcov 源码覆盖重放作为质量汇报口径；短期不继续扩展，优先完善 AFL feedback 闭环。
 
 ## 一、工作定位与阶段结论
 
