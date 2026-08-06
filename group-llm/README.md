@@ -191,4 +191,15 @@ PYTHONPATH=src python3 -m group_llm feedback \
 
 该命令读取 InstanLLM 的 AFL edge maps，计算每个 ready group 对 union edge 的增量贡献，并把 reward 拆分到 source features。输出位于 `out/afl-feedback/`，其中 `feature-afl-rewards.jsonl` 会被后续 `prepare` 自动读取，用于提高高价值 feature 在下一轮组合中的采样概率。
 
+reward 公式：
+
+```text
+new_edges(group) = edges(group) - previous_union_edges
+new_edges_sum(feature) += new_edges(group) / source_feature_count(group)
+reward_score = new_edges_sum + 25.0 * novel_group_count + 0.001 * edge_entries_sum
+feedback_bonus = min(8.0, reward_score / 8000.0)
+```
+
+`reward_score` 是 feature 级历史贡献分；`feedback_bonus` 是它在下一轮 candidate 采样排序中的加分。reward 不会绕过兼容性检查：language、required target architecture、target options 和 test-mode bucket 不兼容时仍然直接淘汰。新 candidate 会携带 `coverage_feedback` 摘要，并进入 GroupLLM prompt，提示模型优先围绕高 reward features 设计真实数据流、控制流或 target-context 交互。
+
 当前 feedback 只服务 LoongArch C/C++ AFL harness，不会把其他 target 架构或专用前端 feature 全局混入。真实小批测试中，加入 required target arch 与 test-mode hard gate 后，GroupLLM rejected 率从 91.67% 降到 25.00%；9 个新 ready groups 经 InstanLLM 后全部 AFL covered，并新增 1,156 条 union edge。阶段评估见 `../docs/AFL反馈闭环阶段评估.md`。
