@@ -33,7 +33,7 @@ DEFAULT_ENV_FILE = Path("../.env")
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-chat"
 DEFAULT_TIMEOUT = 240.0
-DEFAULT_MAX_TOKENS = 16000
+DEFAULT_MAX_TOKENS = 32000
 DEFAULT_SHOWMAP_TIMEOUT_MS = 20000
 DEFAULT_TARGET = "loongarch64-linux-gnu"
 DEFAULT_EVALUATION_OPTIMIZATION = os.environ.get("INSTANLLM_EVALUATION_OPTIMIZATION", "-Ofast")
@@ -319,7 +319,9 @@ def build_messages(group: Mapping[str, Any]) -> List[Dict[str, str]]:
         "as concrete code. Avoid undefined behavior unless the group is explicitly a diagnostic test, "
         "and then make the expected diagnostic explicit. If the group cannot be instantiated as one "
         "local source file, return instantiation_status=rejected with concrete reasons.\n\n"
-        "Return exactly one JSON object. Do not emit Markdown or prose outside JSON."
+        "Return exactly one JSON object. Do not emit Markdown or prose outside JSON. Do not write "
+        "chain-of-thought, analysis, or a long derivation. Put the final JSON object directly in "
+        "message.content. Keep notes and build explanations concise so the response cannot be truncated."
     )
     user = (
         "Instantiate the following ready GroupLLM group into a complete compiler test program. "

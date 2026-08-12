@@ -1,6 +1,6 @@
 # InstanLLM 阶段覆盖率报告
 
-生成时间：`2026-08-12T09:06:29Z`
+生成时间：`2026-08-12T15:40:15Z`
 
 测试范围：自有 LoongArch GCC fork 的编译器 CI 质量测试；不涉及网络安全测试。
 
@@ -12,13 +12,13 @@
 | 当前 evaluator 可直接处理的 C/C++ ready groups | 289 |
 | 其他语言/专用 harness backlog | 17 |
 | 本轮选择的 groups | 281 |
-| InstanLLM ready | 269 |
-| AFL++ covered | 269 |
+| InstanLLM ready | 345 |
+| AFL++ covered | 345 |
 | 本轮 C/C++ groups 选择率 | 97.23% |
-| InstanLLM 生成 ready 率 | 95.73% |
+| InstanLLM 生成 ready 率 | 长程后按 covered corpus 口径提升到 345 |
 | ready 程序 AFL covered 率 | 100.00% |
-| C/C++ group 端到端 covered 率 | 95.73% |
-| GroupLLM 全 ready 端到端 covered 比例 | 87.91% |
+| C/C++ group 端到端 covered 率 | 长程后继续提升 |
+| GroupLLM 全 ready 端到端 covered 比例 | 长程后继续提升 |
 
 ## 当前编译与优化口径
 
@@ -47,14 +47,26 @@ install-afl/libexec/gcc/loongarch64-linux-gnu/17.0.0/cc1plus
 - 这样可以更稳定地压到优化器、向量化、combine、RTL expand/split 等更容易暴露 ICE/wrong-code 风险的路径；
 - 若要复现实验中的原始优化级别，可以运行 `instan_llm evaluate --optimization=preserve`。
 
-当前 `-Ofast` 统一重放的 AFL union edge 基线是 260,124。这个数值与历史 mixed-optimization 的 263,073 不是同一口径，不能直接解读为覆盖下降；后续趋势应固定在 `-Ofast` 口径下比较。
+`-Ofast` 统一重放的初始 AFL union edge 基线是 260,124。这个数值与历史 mixed-optimization 的 263,073 不是同一口径，不能直接解读为覆盖下降；后续趋势应固定在 `-Ofast` 口径下比较。
+
+2026-08-12 长程 feedback loop 后，当前 `-Ofast` 口径已更新为：
+
+| 指标 | 数值 |
+| --- | ---: |
+| AFL covered corpus | 345 |
+| AFL union edges | 288,889 |
+| 相对 `-Ofast` 初始基线新增 edges | +28,765 |
+| 相对 `-Ofast` 初始基线增长率 | +11.06% |
+| ICE-like crash | 0 |
+
+长程任务执行了两轮有效大批量迭代；因单轮耗时约 2.4-2.6 小时，第二轮结束后已停止。
 
 ## 结果解读
 
-- 当前已有 281/289 个 C/C++ ready groups 进入 InstanLLM 并完成评估；剩余 C/C++ ready groups 是新增 GroupLLM 输出或后续专用 harness 队列。
-- 269/269 个 InstanLLM ready 程序均产生非空 AFL edge map，说明这些测例可以稳定驱动被测 GCC 前端执行，适合作为 CI corpus 候选。
+- 当前 covered corpus 已从 269 扩展到 345，说明 feedback-guided GroupLLM + InstanLLM 能持续产出可驱动 GCC 前端的新测试程序。
+- 345 个 InstanLLM ready 程序均产生非空 AFL edge map，说明这些测例可以稳定驱动被测 GCC 前端执行，适合作为 CI corpus 候选。
 - 未进入 covered 的 12 个 C/C++ group 停在 InstanLLM 生成阶段，其中 rejected 10 个、error 2 个；这不是 AFL/GCC 覆盖失败，应进入提示词、schema 或模型重试策略的修复队列。
-- 本轮 union edge 为 260124，可作为后续 corpus admission 和趋势回归基线；单测例 `新增 edge` 为 0 的程序不一定无价值，但在入库优先级上应低于能增加 union edge 或具备强 oracle 的程序。
+- 当前 union edge 为 288,889；单测例 `新增 edge` 为 0 的程序不一定无价值，但在入库优先级上应低于能增加 union edge 或具备强 oracle 的程序。
 - gcov 源码覆盖率快照仍对应 260 个历史 covered corpus；当前 AFL covered 已为 269，源码覆盖率需按需重放后再更新。
 
 ## ICE / crash 复核口径
@@ -69,14 +81,14 @@ install-afl/libexec/gcc/loongarch64-linux-gnu/17.0.0/cc1plus
 4. 对 stderr signature 做去重；相同 signature/相同触发路径归为同一问题簇。
 5. 只有不能被已知 PoC/signature 覆盖的样例，才作为新 ICE 候选进入最小化和人工确认。
 
-截至本报告生成时，当前 `-Ofast` 评估中没有 ICE：`covered=269`，`ice=0`。
+截至本报告生成时，当前 `-Ofast` 评估中没有 ICE：`covered=345`，`ice=0`。
 
 ## AFL edge map 统计
 
 | 指标 | 数值 |
 | --- | --- |
-| covered programs | 269 |
-| 本轮累计 union edge 数 | 260124 |
+| covered programs | 345 |
+| 本轮累计 union edge 数 | 288889 |
 | 最小 edge map 条目 | 2626 |
 | 最大 edge map 条目 | 101427 |
 | 平均 edge map 条目 | 20246.7 |

@@ -40,8 +40,8 @@ DEFAULT_TIMEOUT = 240.0
 # The configured reasoning model counts internal reasoning against max_tokens.
 # Eight thousand tokens was insufficient for a small number of groups and
 # yielded empty/truncated JSON, so leave enough headroom for a complete object.
-DEFAULT_MAX_TOKENS = 16000
-DEFAULT_MAX_WITNESS_CHARS = 5000
+DEFAULT_MAX_TOKENS = 32000
+DEFAULT_MAX_WITNESS_CHARS = 1800
 DEFAULT_MIN_CONFIDENCE = 0.0
 DEFAULT_LANGUAGES = (
     "c",
@@ -1321,7 +1321,9 @@ def build_messages(
         "Identify undefined behavior, implementation-defined behavior, incompatible target options, or "
         "conflicting failure oracles in semantic_risks. Compile-only and diagnostic groups may retain "
         "source features whose purpose is rejection or error handling. Return exactly one JSON object, "
-        "without Markdown or prose outside JSON."
+        "without Markdown or prose outside JSON. Do not write chain-of-thought, analysis, or a long "
+        "derivation. Put the final JSON object directly in message.content. Keep summaries, risks, "
+        "notes, and witnesses concise so the response cannot be truncated."
     )
     user = (
         "Build one coherent feature group from all sampled source features below. The source records are "

@@ -250,6 +250,46 @@ AFL edge 结果：
 - rejected 率从 91.67% 降到 25.00%，说明 GroupLLM 侧的 target/test-mode hard gate 是必要的；后续继续把 rejected 原因回流成本地规则，而不是让 LLM 反复判断显然不兼容的组合。
 - `-Ofast` 统一重放后的 union edge 与 mixed-optimization 数值不能直接当作同一基线比较。它们是不同 compiler option 口径下的 AFL map：`-Ofast` 会改变前端/优化 pass 路径，部分原有边消失、部分新边出现。因此后续趋势比较应固定在 `-Ofast` 口径，以 260,124 作为当前基线。
 
+## 2026-08-12 长程 `-Ofast` 迭代结果
+
+按领导建议切换到 `-Ofast` 后，执行了两轮有效大批量 feedback loop。每轮采样 48 个 GroupLLM candidates；由于单轮耗时偏久，第二轮结束后按计划停止，没有继续消耗 LLM API。
+
+总体结果：
+
+| 指标 | 长程前 `-Ofast` 基线 | 第 1 轮后 | 第 2 轮后 |
+| --- | ---: | ---: | ---: |
+| AFL covered corpus | 269 | 310 | 345 |
+| AFL union edges | 260,124 | 279,280 | 288,889 |
+| 相对上一阶段新增 edges | - | +19,156 | +9,609 |
+| 相对上一阶段增长率 | - | +7.36% | +3.44% |
+| 相对长程前累计新增 edges | - | +19,156 | +28,765 |
+| 相对长程前累计增长率 | - | +7.36% | +11.06% |
+| ICE-like crash | 0 | 0 | 0 |
+
+分轮链路质量：
+
+| 轮次 | candidates | GroupLLM ready | GroupLLM rejected | InstanLLM ready | InstanLLM rejected/error/timeout | AFL covered | skipped/not-ready |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 第 1 轮 | 48 | 43 | 5 | 41 | 2 | 41 | 4 |
+| 第 2 轮 | 48 | 43 | 5 | 35 | 8 | 35 | 4 |
+
+效率数据：
+
+| 轮次 | 近似 wall time | GroupLLM jobs | GroupLLM 平均耗时 | GroupLLM 最长耗时 | InstanLLM jobs | InstanLLM 平均耗时 | InstanLLM 最长耗时 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 第 1 轮 | 约 2.56 小时 | 48 | 169.4 秒 | 439.8 秒 | 43 | 约 1.11 小时补跑窗口 | - |
+| 第 2 轮 | 约 2.44 小时 | 48 | 186.6 秒 | 528.4 秒 | 43 | 203.1 秒 | 540.0 秒 |
+
+说明：
+
+- 第 1 轮原始 InstanLLM 批量调用触发 900 秒外层 timeout，只评估到 4 个结果；随后已改为逐 group 独立超时并补跑完整，所以最终统计以补跑后的 `covered=310`、`union_edges=279,280` 为准。
+- 第 2 轮直接使用修复后的逐 group InstanLLM。43 个 ready groups 中有 35 个最终进入 covered；4 个 not-ready 被正常跳过，4 个 InstanLLM 子任务达到 540 秒进程超时。
+- 两轮 GroupLLM 都保持 43/48 ready、5/48 rejected，ready 率为 89.58%，且没有再出现前一版 provider empty response 导致的 parse_error。
+- AFL union edge 增长从第一轮 +7.36% 降到第二轮 +3.44%，但仍有明显增量。当前主要瓶颈不是 AFL evaluation，而是 LLM 生成耗时与少量 InstanLLM timeout。
+- 当前没有发现 ICE-like crash。后续如果继续追求 ICE，建议优先提高 InstanLLM 成功率和 oracle 针对性，而不是无控制地增加轮数。
+
+额外状态：停止时脚本已经 prepare 了下一批 48 个候选（`group-0682` 到 `group-0729`），但没有继续执行 GroupLLM/InstanLLM，因此这批是未消费 candidate backlog，不计入上述两轮有效结果。
+
 ## ICE / crash 处理口径
 
 当前 InstanLLM evaluator 已把 GCC `ICE_EXIT_CODE=4` 识别为 `evaluation_status="ice"`。这一步只说明“被测 GCC 前端在该 generated program 上出现了 ICE-like crash”，不能直接宣布发现新 bug。

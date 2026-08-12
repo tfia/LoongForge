@@ -206,9 +206,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--group-process-timeout", type=int, default=240)
     parser.add_argument("--group-parallel", type=int, default=4)
     parser.add_argument("--group-retries", type=int, default=2)
+    parser.add_argument("--group-max-tokens", type=int, default=32000)
+    parser.add_argument("--group-max-witness-chars", type=int, default=1800)
+    parser.add_argument(
+        "--resume-tail",
+        action="store_true",
+        help="reuse the latest batch-size candidate ids instead of appending a new prepare batch",
+    )
     parser.add_argument("--instan-workers", type=int, default=2)
     parser.add_argument("--instan-timeout", type=int, default=180)
-    parser.add_argument("--instan-process-timeout", type=int, default=900)
+    parser.add_argument("--instan-process-timeout", type=int, default=420)
+    parser.add_argument("--instan-max-tokens", type=int, default=32000)
     parser.add_argument("--evaluate-timeout-ms", type=int, default=20000)
     parser.add_argument("--optimization", default="-Ofast")
     parser.add_argument("--coverage-basis", default="ready")
@@ -229,20 +237,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         before_edges = union_edges()
         iter_log = log_dir / f"iter-{iteration:03d}"
         seed = args.seed_base + iteration
-        print(f"[iter {iteration}] prepare batch={args.batch_size} seed={seed}", flush=True)
-        run_logged(
-            name="01-prepare",
-            cwd=GROUP_DIR,
-            env=group_env,
-            args=[
-                sys.executable, "-m", "group_llm", "prepare",
-                "--output-dir", "out",
-                "--append-groups", str(args.batch_size),
-                "--coverage-basis", args.coverage_basis,
-                "--seed", str(seed),
-            ],
-            log_dir=iter_log,
-        )
+        if args.resume_tail and iteration == 1:
+            print(f"[iter {iteration}] resume latest batch={args.batch_size}", flush=True)
+        else:
+            print(f"[iter {iteration}] prepare batch={args.batch_size} seed={seed}", flush=True)
+            run_logged(
+                name="01-prepare",
+                cwd=GROUP_DIR,
+                env=group_env,
+                args=[
+                    sys.executable, "-m", "group_llm", "prepare",
+                    "--output-dir", "out",
+                    "--append-groups", str(args.batch_size),
+                    "--coverage-basis", args.coverage_basis,
+                    "--seed", str(seed),
+                ],
+                log_dir=iter_log,
+            )
         ids = candidate_ids_tail(args.batch_size)
 
         def run_group(index_and_gid: tuple[int, str]) -> tuple[str, int]:
@@ -257,6 +268,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "--workers", "1",
                     "--timeout", str(args.group_api_timeout),
                     "--retries", str(args.group_retries),
+                    "--max-tokens", str(args.group_max_tokens),
+                    "--max-witness-chars", str(args.group_max_witness_chars),
                     "--group-id", gid,
                 ],
                 log_dir=iter_log,
@@ -290,22 +303,41 @@ def main(argv: Sequence[str] | None = None) -> int:
         ready_ids = ready_group_ids(ids)
 
         if ready_ids:
-            run_logged(
-                name="04-instan-run",
-                cwd=INSTAN_DIR,
-                env=instan_env,
-                args=[
-                    sys.executable, "-m", "instan_llm", "run",
-                    "--groups-file", str(GROUPS_FILE),
-                    "--output-dir", "out",
-                    "--workers", str(args.instan_workers),
-                    "--timeout", str(args.instan_timeout),
-                    *repeated_group_args(ready_ids),
-                ],
-                log_dir=iter_log,
-                timeout=args.instan_process_timeout,
-                continue_on_error=True,
+            def run_instan(index_and_gid: tuple[int, str]) -> tuple[str, int]:
+                index, gid = index_and_gid
+                proc = run_logged(
+                    name=f"04-instan-{index:03d}-{gid}",
+                    cwd=INSTAN_DIR,
+                    env=instan_env,
+                    args=[
+                        sys.executable, "-m", "instan_llm", "run",
+                        "--groups-file", str(GROUPS_FILE),
+                        "--output-dir", "out",
+                        "--workers", "1",
+                        "--timeout", str(args.instan_timeout),
+                        "--max-tokens", str(args.instan_max_tokens),
+                        "--group-id", gid,
+                    ],
+                    log_dir=iter_log,
+                    timeout=args.instan_process_timeout,
+                    continue_on_error=True,
+                )
+                return gid, int(proc.returncode)
+
+            instan_jobs = list(enumerate(ready_ids, start=1))
+            print(
+                f"[iter {iteration}] instan synthesis {len(instan_jobs)} jobs "
+                f"parallel={args.instan_workers} per_process_timeout={args.instan_process_timeout}s",
+                flush=True,
             )
+            with concurrent.futures.ThreadPoolExecutor(max_workers=args.instan_workers) as executor:
+                futures = [executor.submit(run_instan, item) for item in instan_jobs]
+                for completed, future in enumerate(concurrent.futures.as_completed(futures), start=1):
+                    gid, returncode = future.result()
+                    print(
+                        f"[iter {iteration}] instan done {completed}/{len(instan_jobs)} {gid} rc={returncode}",
+                        flush=True,
+                    )
             run_logged(
                 name="05-evaluate",
                 cwd=INSTAN_DIR,
