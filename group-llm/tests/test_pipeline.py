@@ -10,6 +10,7 @@ from group_llm.pipeline import (
     build_messages,
     candidate_output_path,
     chat_endpoint,
+    feedback_iteration_compatible,
     pair_affinity,
     load_env_file,
     normalize_group_output,
@@ -177,6 +178,48 @@ class PipelineTests(unittest.TestCase):
         runtime["feature"]["failure_mode"] = "wrong-code"
         runtime["feature"]["description"] = "Runtime wrong-code differential test."
         self.assertLess(pair_affinity(diagnostic, runtime)["score"], -999)
+
+    def test_feedback_loop_excludes_non_loongarch_hard_constraints(self):
+        mips = pool_record(50)
+        mips["feature"]["description"] = "MIPS32 shift-sign-branch optimization."
+        mips["feature"]["target_options"] = ["-mips32", "-O2"]
+        self.assertFalse(feedback_iteration_compatible(mips, "loongarch"))
+
+        big_endian = pool_record(51)
+        big_endian["feature"]["description"] = "Big-endian _BitInt limb access."
+        big_endian["feature"]["target_options"] = ["-mbig-endian", "-std=gnu2x"]
+        self.assertFalse(feedback_iteration_compatible(big_endian, "loongarch"))
+
+        x86_reg = pool_record(52)
+        x86_reg["feature"]["description"] = "x86 hard register vector indexing."
+        x86_reg["feature"]["code_witness"] = 'register int v asm("xmm0");'
+        self.assertFalse(feedback_iteration_compatible(x86_reg, "loongarch"))
+
+    def test_sampling_filters_pairwise_option_and_mode_conflicts(self):
+        soft = pool_record(60)
+        soft["feature"]["target_options"] = ["-mabi=lp64s", "-msoft-float"]
+        vector = pool_record(61)
+        vector["feature"]["target_options"] = ["-mabi=lp64d", "-mlasx"]
+        self.assertFalse(options_compatible(soft, vector))
+
+        diagnostic = pool_record(62)
+        diagnostic["feature"]["failure_mode"] = "rejects-valid"
+        diagnostic["feature"]["description"] = "Must emit a diagnostic error message."
+        runtime = pool_record(63)
+        runtime["feature"]["failure_mode"] = "wrong-code"
+        runtime["feature"]["description"] = "Runtime wrong-code differential test."
+        sampled = sample_candidate_groups(
+            self.pool + [soft, vector, diagnostic, runtime],
+            group_count=4,
+            min_features=3,
+            max_features=3,
+            seed=61,
+            target_profile="loongarch",
+        )
+        for candidate in sampled:
+            uids = set(candidate["source_feature_uids"])
+            self.assertFalse({soft["feature_uid"], vector["feature_uid"]}.issubset(uids))
+            self.assertFalse({diagnostic["feature_uid"], runtime["feature_uid"]}.issubset(uids))
 
     def test_prepare_can_append_without_replacing_existing_candidates(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -194,9 +194,14 @@ class PipelineTests(unittest.TestCase):
     def test_sanitize_options_removes_linker_only_flags(self):
         self.assertEqual(
             sanitize_compiler_options(["-lffi", "-Wl,-rpath,x", "-L/tmp", "-shared", "-O3", "-mlasx"]),
+            ["-Ofast", "-mlasx"],
+        )
+        self.assertEqual(sanitize_compiler_options(["-mlsx"]), ["-Ofast", "-mlsx"])
+        self.assertEqual(
+            sanitize_compiler_options(["-O3", "-mlasx"], optimization="preserve"),
             ["-O3", "-mlasx"],
         )
-        self.assertEqual(sanitize_compiler_options(["-mlsx"]), ["-O2", "-mlsx"])
+        self.assertEqual(sanitize_compiler_options(["-mlsx"], optimization="preserve"), ["-O2", "-mlsx"])
 
     def test_select_groups_can_filter_languages(self):
         c_group = ready_group("c")
@@ -272,6 +277,9 @@ class PipelineTests(unittest.TestCase):
 
             manifest = evaluate_instantiations(output, showmap_script=fake_showmap)
             self.assertEqual(manifest["counts"]["covered"], 1)
+            evaluation = json.loads(next((output / "evaluations").glob("*.evaluation.json")).read_text(encoding="utf-8"))
+            self.assertEqual(evaluation["compiler_options"][0], "-Ofast")
+            self.assertEqual(evaluation["optimization_policy"], "-Ofast")
             verify_outputs(output, require_evaluations=True, min_covered=1)
             corpus = build_corpus(output)
             self.assertEqual(corpus["counts"]["copied"], 1)

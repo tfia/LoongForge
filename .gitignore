@@ -19,6 +19,7 @@ __pycache__/
 venv/
 
 # Logs and temporary outputs
+logs/
 *.log
 *.tmp
 *.bak

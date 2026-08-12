@@ -311,7 +311,7 @@ def required_architecture_set(record: Mapping[str, Any]) -> Set[str]:
     )
     x86_terms = (
         "-m32", "-m64", "-mavx", "-mavx512", "-mfpmath=387", "x87", "gotpcrel", "mxcsr",
-        "__builtin_ia32",
+        "__builtin_ia32", "asm(\"xmm", "asm(\"ymm", "asm(\"zmm", "xmm0", "xmm1", "xmm2",
         "x86-specific", "x86 target", "x86-64 target",
     )
     arm_terms = ("-march=arm", "-march=armv", "-march=aarch64", "aarch64 target", "aarch64-specific")
@@ -322,6 +322,7 @@ def required_architecture_set(record: Mapping[str, Any]) -> Set[str]:
         "-march=rv", "riscv target", "risc-v target", "riscv-specific", "risc-v-specific",
         "on riscv", "on risc-v", "riscv64",
     )
+    mips_terms = ("-mips", "mips32", "mips64", "mips target", "mips-specific", "on mips")
     if any(term in text for term in loong_terms):
         result.add("loongarch")
     if any(term in text for term in x86_terms):
@@ -336,6 +337,8 @@ def required_architecture_set(record: Mapping[str, Any]) -> Set[str]:
         result.add("powerpc")
     if any(term in text for term in riscv_terms):
         result.add("riscv")
+    if any(term in text for term in mips_terms):
+        result.add("mips")
     return result
 
 
@@ -379,7 +382,12 @@ def feedback_iteration_compatible(record: Mapping[str, Any], target_profile: str
         return False
     if "unsupported-target" in text or ("fixed-point" in text and "unsupported target" in text):
         return False
-    if any(term in text for term in ("__builtin_ia32", "mxcsr", "dlopen", "-shared", "-pthread")):
+    hard_excludes = (
+        "__builtin_ia32", "mxcsr", "asm(\"xmm", "asm(\"ymm", "asm(\"zmm", "xmm0", "xmm1",
+        "xmm2", "x86 hard register", "-mips", "mips32", "mips64", "-mbig-endian",
+        "big-endian", "big endian", "-fplugin", "gcc plugin", "dlopen", "-shared", "-pthread",
+    )
+    if any(term in text for term in hard_excludes):
         return False
     profile = target_profile.strip().lower()
     if not profile or profile == "any":
@@ -482,6 +490,8 @@ def option_constraints(record: Mapping[str, Any]) -> Dict[str, Any]:
         "requires_lasx": any(term in text for term in ("-mlasx", "-msimd=lasx")),
         "forbids_lsx": "-mno-lsx" in text,
         "forbids_lasx": "-mno-lasx" in text,
+        "big_endian": any(term in text for term in ("-mbig-endian", "-mbig", "big-endian", "big endian")),
+        "little_endian": any(term in text for term in ("-mlittle-endian", "-mlittle", "little-endian", "little endian")),
     }
 
 
@@ -495,6 +505,12 @@ def options_compatible(left: Mapping[str, Any], right: Mapping[str, Any]) -> boo
     if (a["forbids_lsx"] and b["requires_lsx"]) or (b["forbids_lsx"] and a["requires_lsx"]):
         return False
     if (a["forbids_lasx"] and b["requires_lasx"]) or (b["forbids_lasx"] and a["requires_lasx"]):
+        return False
+    if (a["big_endian"] and b["little_endian"]) or (b["big_endian"] and a["little_endian"]):
+        return False
+    if (a["big_endian"] and (b["requires_lsx"] or b["requires_lasx"])) or (
+        b["big_endian"] and (a["requires_lsx"] or a["requires_lasx"])
+    ):
         return False
     a_levels = a["optimization_levels"]
     b_levels = b["optimization_levels"]
@@ -958,6 +974,10 @@ def sample_candidate_groups(
                     if any(not languages_compatible(candidate, item) for item in current):
                         continue
                     if any(not architectures_compatible(candidate, item) for item in current):
+                        continue
+                    if any(not options_compatible(candidate, item) for item in current):
+                        continue
+                    if any(not test_modes_compatible(candidate, item) for item in current):
                         continue
                     support_count = sum(
                         1

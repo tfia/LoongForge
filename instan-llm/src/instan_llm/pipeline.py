@@ -36,6 +36,8 @@ DEFAULT_TIMEOUT = 240.0
 DEFAULT_MAX_TOKENS = 16000
 DEFAULT_SHOWMAP_TIMEOUT_MS = 20000
 DEFAULT_TARGET = "loongarch64-linux-gnu"
+DEFAULT_EVALUATION_OPTIMIZATION = os.environ.get("INSTANLLM_EVALUATION_OPTIMIZATION", "-Ofast")
+GCC_ICE_EXIT_CODE = 4
 
 VALID_INSTANTIATION_STATUSES = {"ready", "rejected"}
 SUPPORTED_EVAL_LANGUAGES = {"c", "c++"}
@@ -322,7 +324,8 @@ def build_messages(group: Mapping[str, Any]) -> List[Dict[str, str]]:
     user = (
         "Instantiate the following ready GroupLLM group into a complete compiler test program. "
         "Every source feature uid must appear exactly once in preservation_checklist. The generated "
-        "program should compile under the listed compiler options on the LoongArch cross compiler. "
+        "program should compile under aggressive optimization on the LoongArch cross compiler. "
+        "Prefer -Ofast unless the group explicitly requires a diagnostic-only option such as -O0/-Og. "
         "If a listed option is linker-only or requires unavailable external libraries, omit it from "
         "compiler_options and explain the decision in build_notes.\n\n"
         "Required JSON shape:\n"
@@ -763,9 +766,17 @@ def load_instantiation_inventory(output_dir: Path) -> List[Dict[str, Any]]:
     return records
 
 
-def sanitize_compiler_options(options: Sequence[str]) -> List[str]:
+OPTIMIZATION_RE = re.compile(r"-O(?:[0-3sSzZg]|fast)$")
+
+
+def sanitize_compiler_options(
+    options: Sequence[str],
+    optimization: str = DEFAULT_EVALUATION_OPTIMIZATION,
+) -> List[str]:
     sanitized: List[str] = []
     skip_next = False
+    optimization = str(optimization or "").strip()
+    force_optimization = bool(optimization and optimization != "preserve")
     for option in options:
         value = str(option).strip()
         if not value:
@@ -781,8 +792,12 @@ def sanitize_compiler_options(options: Sequence[str]) -> List[str]:
             continue
         if value in {"-shared", "-static", "-pie"}:
             continue
+        if force_optimization and OPTIMIZATION_RE.fullmatch(value):
+            continue
         sanitized.append(value)
-    if not any(re.fullmatch(r"-O[0-3sSzZgfast]+", item) for item in sanitized):
+    if force_optimization:
+        sanitized.insert(0, optimization)
+    elif not any(OPTIMIZATION_RE.fullmatch(item) for item in sanitized):
         sanitized.insert(0, "-O2")
     return sanitized
 
@@ -834,6 +849,7 @@ def evaluate_one(
     timeout_ms: int,
     min_edges: int,
     showmap_script: Optional[Path] = None,
+    optimization: str = DEFAULT_EVALUATION_OPTIMIZATION,
 ) -> Dict[str, Any]:
     status = str(instantiation.get("instantiation_status") or "")
     instantiation_id = fallback_instantiation_id(instantiation)
@@ -866,7 +882,8 @@ def evaluate_one(
     source_path = write_program_source(output_dir, instantiation)
     map_path = output_dir / "coverage" / f"{instantiation_id}.map"
     map_path.parent.mkdir(parents=True, exist_ok=True)
-    options = sanitize_compiler_options(string_list(instantiation.get("compiler_options")))
+    original_options = string_list(instantiation.get("compiler_options"))
+    options = sanitize_compiler_options(original_options, optimization)
     script = showmap_script or (repo_root() / "scripts" / "afl-showmap-gcc.sh")
     command = [
         str(script),
@@ -889,6 +906,8 @@ def evaluate_one(
     status = "covered" if result["returncode"] == 0 and edge_count >= min_edges else "coverage_failed"
     if result["timed_out"]:
         status = "timeout"
+    elif result["returncode"] == GCC_ICE_EXIT_CODE:
+        status = "ice"
     elif result["returncode"] not in (0, None) and edge_count == 0:
         status = "compile_failed"
     evaluation = {
@@ -900,6 +919,8 @@ def evaluate_one(
         "source_path": str(source_path),
         "source_sha256": file_sha256(source_path),
         "compiler_options": options,
+        "original_compiler_options": original_options,
+        "optimization_policy": optimization,
         "evaluation_status": status,
         "created_at": utc_now(),
         "quality_scope": "compiler CI quality testing; not security testing",
@@ -925,6 +946,7 @@ def evaluate_instantiations(
     timeout_ms: int = DEFAULT_SHOWMAP_TIMEOUT_MS,
     min_edges: int = 1,
     showmap_script: Optional[Path] = None,
+    optimization: str = DEFAULT_EVALUATION_OPTIMIZATION,
 ) -> Dict[str, Any]:
     output_dir = output_dir.resolve()
     if instantiations_file:
@@ -953,7 +975,7 @@ def evaluate_instantiations(
             skipped_existing += 1
             continue
         evaluations.append(
-            evaluate_one(instantiation, output_dir, timeout_ms, min_edges, showmap_script)
+            evaluate_one(instantiation, output_dir, timeout_ms, min_edges, showmap_script, optimization)
         )
 
     all_evaluations = load_evaluation_inventory(output_dir)
@@ -970,6 +992,7 @@ def evaluate_instantiations(
             "refresh": refresh,
             "timeout_ms": timeout_ms,
             "min_edges": min_edges,
+            "optimization": optimization,
         },
         "counts": {
             "selected_instantiations": len(selected),

@@ -1,6 +1,6 @@
 # AFL edge 反馈闭环阶段评估
 
-日期：2026-08-06
+日期：2026-08-12
 
 测试范围：自有 LoongArch GCC fork 的编译器 CI 质量测试；不涉及网络安全测试。
 
@@ -28,6 +28,8 @@
 4. `group_llm prepare` 自动读取上述 `feature-afl-rewards.jsonl`，在后续候选采样中提高高 reward feature 的优先级。
 
 核心原则：AFL edge feedback 只服务当前可执行的 LoongArch C/C++ AFL harness。Fortran/Ada/D/COBOL/shell、其他 target 架构、build/link 级专用场景不会被无差别混入当前反馈迭代。
+
+当前 InstanLLM 评估口径已按质量测试要求切到更激进的优化路径：默认用 `-Ofast` 重放 generated programs。实现方式是在 AFL showmap 评估前统一清理原有 `-O*` 选项并前置 `-Ofast`；如需要复现实验中的原始模型选项，可显式传 `--optimization=preserve`。
 
 ## reward 如何计算
 
@@ -122,7 +124,7 @@ group-llm/out/afl-feedback/feature-afl-rewards.jsonl
 
 - language 属于 C/C++/asm/c-header/unknown/other 中可落入当前 C/C++ 生成链路的范围；
 - required target architecture 必须是 LoongArch，或没有明确 required target；
-- 排除 Go/gccgo/libgo、unsupported-target fixed-point、MXCSR/dlopen/shared pthread 等需要专用 harness 的 feature；
+- 排除 Go/gccgo/libgo、unsupported-target fixed-point、MIPS `-mips32`/`mips64`、x86 hard register / `__builtin_ia32` / MXCSR、big-endian `_BitInt`、GCC plugin、dlopen/shared/pthread 等需要专用 harness 或非 LoongArch target 的 feature；
 - pair 级别还要求 language、required architecture、target options、test-mode bucket 兼容。
 
 这一步是降低 rejected 率的关键。第一版全局 reward 加权会把 x86、m68k、PowerPC、COBOL 等高 reward feature 与 LoongArch feature 混在一起，导致 GroupLLM 正确拒绝。现在 reward 只在“能被当前 harness 测”的空间内发挥作用。
@@ -153,6 +155,8 @@ feedback_bonus = min(8.0, reward_score / 8000.0)
 - 如果 pair affinity、target/options/test-mode 不兼容，直接淘汰，reward 再高也不能进入 group。
 - 如果 feature 兼容且语义相关，reward 会提高它进入下一轮组合的概率。
 - `feedback_bonus` 最大封顶 8 分，避免一个历史高覆盖 feature 垄断所有组合。
+
+这也是向领导解释 reward 时最重要的一点：reward 是“覆盖反馈驱动的排序信号”，不是“越高越必须组合”的硬命令。硬约束仍然优先，包括目标架构、ABI、优化选项、测试模式、语言前端和 harness 能力。这样可以避免把历史上高覆盖但目标不兼容的 feature 强行组合成无效 PoC。
 
 ### 3. 写入 candidate，交给 GroupLLM 参考
 
@@ -188,8 +192,15 @@ feedback_bonus = min(8.0, reward_score / 8000.0)
 | 初版 feedback | 全局 reward 加权 | 1/12 | 11/12 | 91.67% |
 | 第一轮修复 | 限制到当前 AFL harness 兼容池 | 7/12 | 5/12 | 41.67% |
 | 第二轮修复 | 增加 required target arch 与 test-mode hard gate | 9/12 | 3/12 | 25.00% |
+| 2026-08-12 校准批 | 继续观察隐性 target/plugin/endianness 冲突 | 8/16 | 5/16 | 31.25% |
 
-剩余 rejected 主要来自更隐蔽的 target/test harness 需求，例如 RISC-V tag、x86 fixed-point unsupported-target、MXCSR/dlopen 多文件运行时 harness。已继续补充本地过滤规则，避免后续重复采样。
+2026-08-12 校准批显示，剩余 rejected 主要来自更隐蔽的硬约束混组：LoongArch 与 MIPS32/x86 hard register、little-endian LoongArch SIMD 与 big-endian `_BitInt`、GCC plugin/analyzer 与执行/汇编扫描 oracle 等。已把这些原因继续沉淀为本地过滤规则：
+
+- `required_architecture_set()` 新增 MIPS 与 x86 hard register 识别；
+- `feedback_iteration_compatible()` 排除 MIPS、x86 hard register、big-endian、GCC plugin 等当前 harness 不能测的 feature；
+- `sample_candidate_groups()` 在组内新增 pairwise `options_compatible()` 与 `test_modes_compatible()` hard gate，避免把明显冲突的 feature 送给 LLM 再拒绝。
+
+这些修改是对原有 GroupLLM 采样路径的直接增强，没有新增冗余管线链路。
 
 ## 真实 LLM + AFL 效果
 
@@ -209,11 +220,13 @@ AFL edge 结果：
 
 | 指标 | 数值 |
 | --- | --- |
-| 原 covered corpus | 260 |
-| 原 union edge | 261,917 |
-| 新增 covered corpus | 9 |
-| 新 union edge | 263,073 |
-| 新增 union edge | 1,156 |
+| 历史 covered corpus | 260 |
+| 历史 mixed-optimization union edge | 261,917 |
+| feedback 后 covered corpus | 269 |
+| feedback 后 mixed-optimization union edge | 263,073 |
+| feedback 带来的 mixed-optimization 新增 edge | 1,156 |
+| 2026-08-12 `-Ofast` 统一重放 covered corpus | 269 |
+| 2026-08-12 `-Ofast` 统一重放 union edge | 260,124 |
 
 新增测例明细：
 
@@ -235,6 +248,45 @@ AFL edge 结果：
 - 新增 9 个测例中 6 个带来 AFL union edge 增量，说明 feedback 并非只是在重复已有路径。
 - 最大单例 `group-0534` 新增 948 edges，说明 C++ 侧仍有较大未探索空间，后续可单独加强 C++ feature grouping。
 - rejected 率从 91.67% 降到 25.00%，说明 GroupLLM 侧的 target/test-mode hard gate 是必要的；后续继续把 rejected 原因回流成本地规则，而不是让 LLM 反复判断显然不兼容的组合。
+- `-Ofast` 统一重放后的 union edge 与 mixed-optimization 数值不能直接当作同一基线比较。它们是不同 compiler option 口径下的 AFL map：`-Ofast` 会改变前端/优化 pass 路径，部分原有边消失、部分新边出现。因此后续趋势比较应固定在 `-Ofast` 口径，以 260,124 作为当前基线。
+
+## ICE / crash 处理口径
+
+当前 InstanLLM evaluator 已把 GCC `ICE_EXIT_CODE=4` 识别为 `evaluation_status="ice"`。这一步只说明“被测 GCC 前端在该 generated program 上出现了 ICE-like crash”，不能直接宣布发现新 bug。
+
+如果后续长程任务出现 ICE，处理流程是：
+
+1. 保存 generated source、compiler options、AFL map、stderr tail 和 signature hash。
+2. 用相同 `cc1/cc1plus`、相同 `-Ofast` 及 target options 复现，排除一次性环境问题。
+3. 对比该 group 的 `source_bug_ids`、历史 bug PoC、已有 crash stderr signature 和最小化样例。
+4. 如果 signature/触发条件已被现有 bug PoC 覆盖，归类为“老问题被重新覆盖”，可作为回归 corpus。
+5. 如果不能被已知 PoC 覆盖，再标记为“新问题候选”，进入最小化和人工确认。
+
+截至 2026-08-12 当前 `-Ofast` 覆盖评估结果中没有 ICE：`covered=269`，`ice=0`。
+
+## 当前长程测试状态
+
+为支持正式大批量测试，新增了可恢复运行器：
+
+```bash
+scripts/run-afl-feedback-loop.py \
+  --iterations 3 \
+  --batch-size 48 \
+  --group-parallel 2 \
+  --group-api-timeout 300 \
+  --group-process-timeout 360 \
+  --optimization=-Ofast
+```
+
+这个脚本仍然调用原有 `group_llm prepare/run/build-groups`、`instan_llm run/evaluate` 和 `group_llm feedback`，只是提供分轮、分组、日志和超时保护。它不是新的管线模式。
+
+2026-08-12 尝试进入长程前，DeepSeek provider 出现明显不稳定：
+
+- 低 timeout 小批：4/4 为 `DeepSeek request failed: The read operation timed out`；
+- 提高 timeout 后重跑：出现 `DeepSeek response content was empty` parse_error，并且剩余请求长时间无返回；
+- 按操作策略已暂停大批量 LLM 消耗，等待更换 provider 或恢复服务稳定后继续。
+
+恢复后建议先跑 1 轮 8-16 个 group 的校准批；若 ready 率、parse_error 和 api_error 正常，再启动 3 轮以上大批量正式长程任务。
 
 ## 下一步
 

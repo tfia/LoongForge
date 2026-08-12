@@ -1,26 +1,31 @@
 # LoongArch64 GCC 插桩质量测试工作纪要与 LLM 变异路线图
 
-汇报日期：2026-07-21
+汇报日期：2026-08-12
 工作目录：`/Users/mac/work/loong-gcc-afl`
 
 仓库名：`loongforge`。当前已将上述工作目录初始化为单仓库 monorepo，但保留原目录名，避免破坏已有脚本和历史报告中的绝对路径。GCC 和 binutils-gdb 源码不直接提交到 monorepo，而是以 `src/gcc-upstream`、`src/binutils-gdb` 两个 Git submodule 锁定版本；具体 commit 见顶层 `third_party/SOURCES.lock`。构建目录、安装目录、AFL 输出、LLM raw outputs 和 `.env` 均由 `.gitignore` 排除，只有代码、文档、脚本、种子和 curated 状态快照进入版本管理。
 
 当前 LLM 管线已扩展为 ExtractLLM -> GroupLLM -> InstanLLM。新增 `instan-llm/` 模块负责读取 GroupLLM 的 ready feature groups，生成完整编译器测试程序，并用 AFL++ wrapped GCC 前端编译记录 edge coverage。只有成功产生非空 coverage map 的 C/C++ 程序会进入 `instan-llm/out/corpus/covered/`，作为后续 CI corpus 候选。
 
-2026-08-05 阶段验证结果：对当前 evaluator 可直接处理的全部 272 个 C/C++ GroupLLM ready groups 做真实 LLM API 测试。InstanLLM 生成 260 个 ready 程序，10 个 rejected，2 个持续 API/parser error；260 个 ready 程序均通过 AFL++ wrapped GCC 覆盖评估并产生非空 edge map。当前批次 union edge 为 261,917，单测例 edge map 条目范围为 2631 到 101423，平均 20319.6。阶段覆盖报告已写入 `docs/InstanLLM_阶段覆盖率报告.md`。
+2026-08-05 阶段验证结果：对当前 evaluator 可直接处理的全部 272 个 C/C++ GroupLLM ready groups 做真实 LLM API 测试。InstanLLM 生成 260 个 ready 程序，10 个 rejected，2 个持续 API/parser error；260 个 ready 程序均通过 AFL++ wrapped GCC 覆盖评估并产生非空 edge map。该批 mixed-optimization union edge 为 261,917，单测例 edge map 条目范围为 2631 到 101423，平均 20319.6。阶段覆盖报告已写入 `docs/InstanLLM_阶段覆盖率报告.md`。
 
 随后已单独构建 gcov 口径 GCC，并用同一批 260 个 covered corpus 重放，开始回答“覆盖了多少 GCC 源码行/函数”的质量汇报问题。当前源码覆盖口径只统计真实存在于 `src/gcc-upstream` 下的 GCC 源码文件，不把测试程序、系统头文件或 build 目录生成文件计入分母；结果为源码行覆盖 298,606/909,439（32.83%）、函数覆盖 38,216/95,267（40.11%）、分支覆盖 224,427/828,708（27.08%）。260 条测例均已执行，其中 104 条返回 0、156 条非零退出；非零退出多来自缺少外部头文件或负向测试，但仍会覆盖 GCC 前端、诊断和 include 搜索路径，因此保留在质量测试覆盖口径中。
 
-2026-08-06 已接入论文式 AFL edge 反馈闭环：GroupLLM 可读取 InstanLLM 的 AFL maps，计算每个 group 对 union edge 的新增贡献，并把 reward 分配给 source features，用于下一轮 feature 选取和组合。第一版全局 reward 加权导致跨 target/language/test-mode 混组，真实小批 rejected 率为 91.67%；加入 LoongArch C/C++ AFL harness 兼容池、required target arch hard gate 和 test-mode hard gate 后，真实小批 rejected 率降到 25.00%。修复后的 9 个新 ready groups 经 InstanLLM 全部生成 ready 且 AFL covered，将 covered corpus 从 260 扩到 269，union edge 从 261,917 提升到 263,073（+1,156）。阶段评估见 `docs/AFL反馈闭环阶段评估.md`。
+2026-08-06 至 2026-08-12 已接入并迭代论文式 AFL edge 反馈闭环：GroupLLM 可读取 InstanLLM 的 AFL maps，计算每个 group 对 union edge 的新增贡献，并把 reward 分配给 source features，用于下一轮 feature 选取和组合。reward 不是硬规则，而是覆盖反馈排序信号：`reward_score = new_edges_sum + 25.0 * novel_group_count + 0.001 * edge_entries_sum`。架构、ABI、优化选项、测试模式和 harness 能力仍是 hard gate，reward 再高也不能绕过。第一版全局 reward 加权导致跨 target/language/test-mode 混组，真实小批 rejected 率为 91.67%；加入 LoongArch C/C++ AFL harness 兼容池、required target arch hard gate 和 test-mode hard gate 后，真实小批 rejected 率降到 25.00%。修复后的 9 个新 ready groups 经 InstanLLM 全部生成 ready 且 AFL covered，将 covered corpus 从 260 扩到 269，mixed-optimization union edge 从 261,917 提升到 263,073（+1,156）。阶段评估见 `docs/AFL反馈闭环阶段评估.md`。
+
+2026-08-12 根据领导建议，InstanLLM evaluation 默认切换为 `-Ofast`：评估前清理原有 `-O*` 并在 compiler options 前置 `-Ofast`，以更集中地触发优化器、向量化、combine、RTL expand/split 等高风险路径。当前 `-Ofast` 统一重放 269 个 covered corpus，AFL union edge 基线为 260,124；该数值与历史 mixed-optimization 263,073 属于不同编译选项口径，后续趋势比较应固定在 `-Ofast` 口径。当前没有 ICE：`ice=0`。如果后续出现 ICE-like crash，必须先复现并对比已有 bug PoC、`source_bug_ids` 和 stderr signature，区分“老问题被重新覆盖”和“新问题候选”。
+
+2026-08-12 还新增了 `scripts/run-afl-feedback-loop.py` 长程运行器，用于按轮次执行 `prepare -> GroupLLM -> build-groups -> InstanLLM -> AFL evaluate -> feedback`，并提供分组日志、独立超时和可恢复能力。该脚本不新增管线模式，只是把现有命令编排成适合夜间/周末正式测试的任务。目前 DeepSeek provider 在长程前出现 read timeout 和 empty response，已按节约 token/API 成本的原则暂停大批量 LLM 消耗；更换 provider 或服务恢复稳定后，可直接恢复长程。
 
 InstanLLM 后续 roadmap：
 
 1. 固化 AFL feedback-guided C/C++ 迭代：保留当前 269 个 covered 程序作为 CI corpus 候选，并继续以新增 union edge 作为入库优先级。
-2. 增强 oracle：区分 `compile_success`、`compile_failure`、`assembly_scan`、`runtime_exit` 和 `differential`，避免所有测试只按“能编译并有 edge”判定。
-3. 继续降低 GroupLLM rejected 率：把 rejected 原因沉淀成本地 required target arch、test-mode、frontend/harness hard gate，减少无效 LLM 调用。
-4. 接入 corpus admission：只把 covered 且 oracle 合格、或能带来新增 union edge 的程序加入 CI corpus，重复覆盖样例降级为备选语料。
-5. 补齐专用 harness：为 assembly-scan、diagnostic、Fortran、asm、RTL、Ada/D/COBOL/shell 分别实现 evaluator。当前这些 GroupLLM ready groups 不是无效，而是不能直接用 `cc1/cc1plus` wrapper 评价。
-6. 保留 gcov 源码覆盖重放作为质量汇报口径；短期不继续扩展，优先完善 AFL feedback 闭环。
+2. 恢复稳定 LLM provider 后，启动 3 轮以上大批量 `-Ofast` 正式长程任务，观察 AFL union edge 增长率、API/parser error、GroupLLM rejected 率和 ICE-like crash。
+3. 增强 oracle：区分 `compile_success`、`compile_failure`、`assembly_scan`、`runtime_exit` 和 `differential`，避免所有测试只按“能编译并有 edge”判定。
+4. 继续降低 GroupLLM rejected 率：把 rejected 原因沉淀成本地 required target arch、test-mode、frontend/harness hard gate，减少无效 LLM 调用。
+5. 接入 corpus admission：只把 covered 且 oracle 合格、或能带来新增 union edge 的程序加入 CI corpus，重复覆盖样例降级为备选语料。
+6. 补齐专用 harness：为 assembly-scan、diagnostic、Fortran、asm、RTL、Ada/D/COBOL/shell 分别实现 evaluator。当前这些 GroupLLM ready groups 不是无效，而是不能直接用 `cc1/cc1plus` wrapper 评价。
+7. 保留 gcov 源码覆盖重放作为质量汇报口径；短期不继续扩展，优先完善 AFL feedback 闭环。
 
 ## 一、工作定位与阶段结论
 
@@ -354,4 +359,4 @@ AFL custom mutator 高频消费
 
 ## 十一、向管理层汇报的建议表述
 
-当前已完成“可插桩、可反馈、可留存、可报告、可语义扩展”的阶段性闭环：LoongArch64 GCC 插桩构建成功，覆盖率反馈和 ICE 识别已验证，历史 Bugzilla 语料已归档，并已通过 ExtractLLM 形成 926 个可组合 feature。下一阶段的重点不是立即把 LLM 放进 fuzz 热路径，而是先用 feature pool 离线生成候选测试，通过覆盖增益和 ICE 发现率做 A/B 评估，最终以异步候选池加本地 custom mutator 的架构进入稳定 CI。
+当前已完成“可插桩、可反馈、可留存、可报告、可语义扩展”的阶段性闭环：LoongArch64 GCC 插桩构建成功，覆盖率反馈和 ICE 识别已验证，历史 Bugzilla 语料已归档，并已通过 ExtractLLM 形成 926 个可组合 feature。当前系统已经能把 AFL 新增 edge 转换为 feature reward，反馈到 GroupLLM 的下一轮组合；InstanLLM 评估已切到 `-Ofast`，用于更集中地测试优化器高风险路径。下一阶段重点是在稳定 LLM provider 后跑大批量长程任务，用固定 `-Ofast` AFL union edge 增长、去重 ICE 候选和 corpus admission 质量评估这套系统的实际收益，最终以异步候选池加本地 custom mutator 的架构进入稳定 CI。

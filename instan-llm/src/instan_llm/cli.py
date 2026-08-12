@@ -11,6 +11,7 @@ from typing import Optional, Sequence
 from .pipeline import (
     DEFAULT_ENV_FILE,
     DEFAULT_GROUPS_FILE,
+    DEFAULT_EVALUATION_OPTIMIZATION,
     DEFAULT_MAX_TOKENS,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_TIMEOUT,
@@ -79,6 +80,14 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--refresh", action="store_true")
     evaluate.add_argument("--timeout-ms", type=int, default=20000)
     evaluate.add_argument("--min-edges", type=int, default=1)
+    evaluate.add_argument(
+        "--optimization",
+        default=DEFAULT_EVALUATION_OPTIMIZATION,
+        help=(
+            "optimization policy for AFL replay. Default is -Ofast. "
+            "Use 'preserve' to keep model-provided -O options and insert -O2 only when missing"
+        ),
+    )
 
     build = subparsers.add_parser(
         "build-corpus", help="copy covered C/C++ programs into a corpus directory"
@@ -133,6 +142,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 refresh=args.refresh,
                 timeout_ms=args.timeout_ms,
                 min_edges=args.min_edges,
+                optimization=args.optimization,
             )
             print(json.dumps(manifest["counts"], ensure_ascii=False, indent=2, sort_keys=True))
             print(f"manifest: {args.output_dir.resolve() / 'evaluation-manifest.json'}")
