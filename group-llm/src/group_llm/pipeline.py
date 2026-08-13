@@ -1549,6 +1549,60 @@ def validate_group(group: Mapping[str, Any], candidate: Mapping[str, Any]) -> No
         raise GroupValidationError(f"source features are disconnected: {sorted(missing)}")
 
 
+def canonical_glue_id(value: Any) -> Optional[str]:
+    """Return canonical ``G<number>`` for common model glue-id spellings."""
+
+    text = str(value or "").strip()
+    match = re.fullmatch(r"[Gg]([1-9][0-9]*)(?:[-_][A-Za-z0-9][A-Za-z0-9_-]*)?", text)
+    if not match:
+        return None
+    return f"G{match.group(1)}"
+
+
+def normalize_glue_references(group: Dict[str, Any]) -> None:
+    """Normalize descriptive glue IDs while preserving the dependency graph.
+
+    Some providers tend to emit IDs like ``G1-scalar-seed-builder`` despite the
+    prompt asking for ``G1``.  The suffix is descriptive rather than semantic, so
+    canonicalize it before strict validation and rewrite all dependency/connects
+    references consistently.
+    """
+
+    glue_features = group.get("glue_features")
+    if not isinstance(glue_features, list):
+        return
+    rewrites: Dict[str, str] = {}
+    used: Set[str] = set()
+    for glue in glue_features:
+        if not isinstance(glue, dict):
+            continue
+        original = str(glue.get("glue_id") or "")
+        canonical = canonical_glue_id(original)
+        if not canonical or canonical in used:
+            continue
+        used.add(canonical)
+        if canonical != original:
+            rewrites[original] = canonical
+            glue["glue_id"] = canonical
+    if not rewrites:
+        return
+
+    def rewrite_node(value: Any) -> str:
+        text = str(value or "")
+        return rewrites.get(text, text)
+
+    for glue in glue_features:
+        if isinstance(glue, dict) and isinstance(glue.get("connects"), list):
+            glue["connects"] = [rewrite_node(node) for node in glue["connects"]]
+    dependencies = group.get("dependencies")
+    if isinstance(dependencies, list):
+        for edge in dependencies:
+            if not isinstance(edge, dict):
+                continue
+            edge["from"] = rewrite_node(edge.get("from"))
+            edge["to"] = rewrite_node(edge.get("to"))
+
+
 def normalize_group_output(
     candidate: Mapping[str, Any],
     raw_response: Mapping[str, Any],
@@ -1582,6 +1636,7 @@ def normalize_group_output(
         json.dumps(candidate.get("source_features", []), ensure_ascii=False)
     )
     parsed["sampling"] = candidate.get("sampling")
+    normalize_glue_references(parsed)
     usage = raw_response.get("usage") if isinstance(raw_response.get("usage"), dict) else {}
     parsed["generated_by"] = {
         "tool": "group-llm",

@@ -216,6 +216,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--instan-workers", type=int, default=2)
     parser.add_argument("--instan-timeout", type=int, default=180)
     parser.add_argument("--instan-process-timeout", type=int, default=420)
+    parser.add_argument("--instan-retries", type=int, default=3)
     parser.add_argument("--instan-max-tokens", type=int, default=32000)
     parser.add_argument("--evaluate-timeout-ms", type=int, default=20000)
     parser.add_argument("--optimization", default="-Ofast")
@@ -315,6 +316,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "--output-dir", "out",
                         "--workers", "1",
                         "--timeout", str(args.instan_timeout),
+                        "--retries", str(args.instan_retries),
                         "--max-tokens", str(args.instan_max_tokens),
                         "--group-id", gid,
                     ],

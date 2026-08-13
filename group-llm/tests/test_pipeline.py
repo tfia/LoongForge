@@ -302,6 +302,30 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(GroupValidationError, "at most four"):
             validate_group(group, candidate)
 
+    def test_normalize_canonicalizes_descriptive_glue_ids(self):
+        candidate = self.candidate()
+        group = self.normalized(candidate)
+        group["glue_features"][0]["glue_id"] = "G1-shared-accumulator"
+        for edge in group["dependencies"]:
+            if edge["to"] == "G1":
+                edge["to"] = "G1-shared-accumulator"
+        raw = {
+            "id": "response-1",
+            "choices": [{"message": {"content": json.dumps(group)}}],
+            "usage": {},
+        }
+
+        normalized = normalize_group_output(candidate, raw, "model", "https://api.example")
+
+        self.assertEqual(normalized["glue_features"][0]["glue_id"], "G1")
+        self.assertTrue(
+            all(
+                edge["from"] != "G1-shared-accumulator"
+                and edge["to"] != "G1-shared-accumulator"
+                for edge in normalized["dependencies"]
+            )
+        )
+
     def test_prompt_requires_glue_without_full_program(self):
         messages = build_messages(self.candidate())
         joined = "\n".join(item["content"] for item in messages)

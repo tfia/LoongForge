@@ -250,45 +250,46 @@ AFL edge 结果：
 - rejected 率从 91.67% 降到 25.00%，说明 GroupLLM 侧的 target/test-mode hard gate 是必要的；后续继续把 rejected 原因回流成本地规则，而不是让 LLM 反复判断显然不兼容的组合。
 - `-Ofast` 统一重放后的 union edge 与 mixed-optimization 数值不能直接当作同一基线比较。它们是不同 compiler option 口径下的 AFL map：`-Ofast` 会改变前端/优化 pass 路径，部分原有边消失、部分新边出现。因此后续趋势比较应固定在 `-Ofast` 口径，以 260,124 作为当前基线。
 
-## 2026-08-12 长程 `-Ofast` 迭代结果
+## 2026-08-12 至 2026-08-13 长程 `-Ofast` 迭代结果
 
-按领导建议切换到 `-Ofast` 后，执行了两轮有效大批量 feedback loop。每轮采样 48 个 GroupLLM candidates；由于单轮耗时偏久，第二轮结束后按计划停止，没有继续消耗 LLM API。
+按领导建议切换到 `-Ofast` 后，先完成两轮基线长程迭代；随后在 2026-08-13 更换 provider，并把并发提高到 GroupLLM 6、InstanLLM 4 后继续跑 3 个大轮次。第 1 个并发轮次消费了此前未执行的 backlog（`group-0682` 到 `group-0729`），其中 timeout group 已按要求补跑；第 2/3 个并发轮次各追加 48 个新 candidates。三轮结束后停止，没有继续开新轮。
 
 总体结果：
 
-| 指标 | 长程前 `-Ofast` 基线 | 第 1 轮后 | 第 2 轮后 |
-| --- | ---: | ---: | ---: |
-| AFL covered corpus | 269 | 310 | 345 |
-| AFL union edges | 260,124 | 279,280 | 288,889 |
-| 相对上一阶段新增 edges | - | +19,156 | +9,609 |
-| 相对上一阶段增长率 | - | +7.36% | +3.44% |
-| 相对长程前累计新增 edges | - | +19,156 | +28,765 |
-| 相对长程前累计增长率 | - | +7.36% | +11.06% |
-| ICE-like crash | 0 | 0 | 0 |
+| 指标 | `-Ofast` 初始基线 | 08-12 两轮后 | 08-13 第 1 并发轮后 | 08-13 第 2 并发轮后 | 08-13 第 3 并发轮后 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| AFL covered corpus | 269 | 345 | 389 | 429 | 471 |
+| AFL union edges | 260,124 | 288,889 | 296,181 | 298,409 | 299,954 |
+| 相对上一阶段新增 edges | - | +28,765 | +7,292 | +2,228 | +1,545 |
+| 相对上一阶段增长率 | - | +11.06% | +2.52% | +0.75% | +0.52% |
+| 相对 `-Ofast` 初始基线累计新增 edges | - | +28,765 | +36,057 | +38,285 | +39,830 |
+| 相对 `-Ofast` 初始基线累计增长率 | - | +11.06% | +13.86% | +14.72% | +15.31% |
+| ICE-like crash | 0 | 0 | 0 | 0 | 0 |
 
-分轮链路质量：
+08-13 三轮并发长程链路质量：
 
-| 轮次 | candidates | GroupLLM ready | GroupLLM rejected | InstanLLM ready | InstanLLM rejected/error/timeout | AFL covered | skipped/not-ready |
+| 轮次 | candidates | GroupLLM ready | GroupLLM rejected | GroupLLM parse/error/timeout | InstanLLM ready/covered | skipped/not-ready | ICE |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 第 1 轮 | 48 | 43 | 5 | 41 | 2 | 41 | 4 |
-| 第 2 轮 | 48 | 43 | 5 | 35 | 8 | 35 | 4 |
+| 第 1 并发轮（补跑后） | 48 | 46 | 2 | 0 | 44 | 2 | 0 |
+| 第 2 并发轮 | 48 | 44 | 4 | 0 | 40 | 4 | 0 |
+| 第 3 并发轮 | 48 | 43 | 4 | 1 parse_error | 42 | 1 | 0 |
+| 合计 | 144 | 133 | 10 | 1 | 126 | 7 | 0 |
 
-效率数据：
+08-13 并发效率数据：
 
 | 轮次 | 近似 wall time | GroupLLM jobs | GroupLLM 平均耗时 | GroupLLM 最长耗时 | InstanLLM jobs | InstanLLM 平均耗时 | InstanLLM 最长耗时 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 第 1 轮 | 约 2.56 小时 | 48 | 169.4 秒 | 439.8 秒 | 43 | 约 1.11 小时补跑窗口 | - |
-| 第 2 轮 | 约 2.44 小时 | 48 | 186.6 秒 | 528.4 秒 | 43 | 203.1 秒 | 540.0 秒 |
+| 第 1 并发轮（含补跑） | 约 0.99 小时 | 48 + 2 补跑 | 165.4 秒 | 420.0 秒（初跑 timeout） | 44 + 5 补跑 | 117.2 秒 | 480.0 秒（初跑 timeout） |
+| 第 2 并发轮 | 约 1.08 小时 | 48 | 243.7 秒 | 589.9 秒 | 44 | 141.8 秒 | 668.4 秒 |
+| 第 3 并发轮 | 约 0.95 小时 | 48 | 199.2 秒 | 606.0 秒 | 43 | 140.8 秒 | 533.3 秒 |
 
 说明：
 
-- 第 1 轮原始 InstanLLM 批量调用触发 900 秒外层 timeout，只评估到 4 个结果；随后已改为逐 group 独立超时并补跑完整，所以最终统计以补跑后的 `covered=310`、`union_edges=279,280` 为准。
-- 第 2 轮直接使用修复后的逐 group InstanLLM。43 个 ready groups 中有 35 个最终进入 covered；4 个 not-ready 被正常跳过，4 个 InstanLLM 子任务达到 540 秒进程超时。
-- 两轮 GroupLLM 都保持 43/48 ready、5/48 rejected，ready 率为 89.58%，且没有再出现前一版 provider empty response 导致的 parse_error。
-- AFL union edge 增长从第一轮 +7.36% 降到第二轮 +3.44%，但仍有明显增量。当前主要瓶颈不是 AFL evaluation，而是 LLM 生成耗时与少量 InstanLLM timeout。
-- 当前没有发现 ICE-like crash。后续如果继续追求 ICE，建议优先提高 InstanLLM 成功率和 oracle 针对性，而不是无控制地增加轮数。
-
-额外状态：停止时脚本已经 prepare 了下一批 48 个候选（`group-0682` 到 `group-0729`），但没有继续执行 GroupLLM/InstanLLM，因此这批是未消费 candidate backlog，不计入上述两轮有效结果。
+- 并发从 GroupLLM 4 / InstanLLM 2 提到 GroupLLM 6 / InstanLLM 4 后，单轮 wall time 从此前约 2.4–2.6 小时下降到约 0.95–1.08 小时；三轮含补跑总 wall time 约 3.04 小时。
+- 第 1 并发轮初跑时有 2 个 GroupLLM process timeout 和 3 个 InstanLLM process timeout；按要求放宽 timeout 后补跑，5 个全部进入 covered，因此最终统计按补跑后 `covered=389`、`union_edges=296,181` 计算。
+- 第 2/3 并发轮使用 `--group-process-timeout 720`、`--instan-process-timeout 720` 和 `--instan-retries 2`，没有再出现 process timeout。第 3 轮只有 1 个 GroupLLM parse_error，原因是 provider 返回 JSON 字符串截断；其余请求正常。
+- 当前 AFL union edge 增长已经明显进入边际递减区间：08-13 三轮依次新增 +7,292、+2,228、+1,545。短期更有效的方向不是无控制增加轮数，而是提高 oracle 质量、修复 InstanLLM not-ready/rejected、并为 assembly-scan/diagnostic/多语言 group 补齐专用 harness。
+- 当前没有发现 ICE-like crash。所有 `instan-llm/out/evaluations.jsonl` 中的状态为 `covered=471`、`skipped_not_ready=27`、`ice=0`。
 
 ## ICE / crash 处理口径
 

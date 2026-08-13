@@ -17,12 +17,12 @@
 
 2026-08-12 还新增并修复了 `scripts/run-afl-feedback-loop.py` 长程运行器，用于按轮次执行 `prepare -> GroupLLM -> build-groups -> InstanLLM -> AFL evaluate -> feedback`，并提供分组日志、独立超时和可恢复能力。该脚本不新增管线模式，只是把现有命令编排成适合夜间/周末正式测试的任务。长程调试中发现两个工程问题并已修复：一是 reasoning-style provider 容易把 token 用在 `reasoning_content` 导致 `message.content` 空，已通过缩短 witness、提高 `max_tokens`、约束直接输出 JSON 缓解；二是 InstanLLM 原先批量提交 40+ groups 时容易被外层 timeout 截断，已改为逐 group 独立超时。
 
-2026-08-12 已完成两轮有效大批量 `-Ofast` feedback loop 后停止：每轮采样 48 个 candidates，两轮 GroupLLM 都得到 43 ready、5 rejected，ready 率 89.58%。covered corpus 从 269 增至 345，AFL union edge 从 260,124 增至 288,889，累计新增 28,765 edges，增长率 11.06%。第 1 轮新增 +19,156 edges（+7.36%），第 2 轮新增 +9,609 edges（+3.44%）。两轮均未发现 ICE-like crash（`ice=0`）。单轮 wall time 约 2.4-2.6 小时，主要瓶颈在 LLM 生成耗时；第二轮结束后按计划停止，不再继续消耗。
+2026-08-12 已完成两轮有效大批量 `-Ofast` feedback loop：covered corpus 从 269 增至 345，AFL union edge 从 260,124 增至 288,889，累计新增 28,765 edges（+11.06%），未发现 ICE。2026-08-13 更换 provider 后提高并发继续执行 3 个大轮次：GroupLLM 并发从 4 提到 6，InstanLLM 并发从 2 提到 4，并把 process timeout 放宽到 720 秒；第 1 并发轮的 timeout 已补跑成功。三轮新增 covered 126 个，AFL union edge 从 288,889 提升到 299,954，新增 11,065 edges；相对 `-Ofast` 初始基线累计新增 39,830 edges（+15.31%）。三轮均未发现 ICE-like crash（`ice=0`）。并发优化后三轮含补跑总 wall time 约 3.04 小时，单轮约 0.95-1.08 小时，较此前 2.4-2.6 小时/轮明显提速；edge 增长依次为 +7,292、+2,228、+1,545，显示覆盖进入边际递减区间。
 
 InstanLLM 后续 roadmap：
 
-1. 固化 AFL feedback-guided C/C++ 迭代：保留当前 345 个 covered 程序作为 CI corpus 候选，并继续以新增 union edge 作为入库优先级。
-2. 下一次长程任务不要无限跑；建议每次 1-2 个大轮次为单位执行，记录 AFL union edge 增长率、API/parser error、GroupLLM rejected 率、InstanLLM timeout 和 ICE-like crash。
+1. 固化 AFL feedback-guided C/C++ 迭代：保留当前 471 个 covered 程序作为 CI corpus 候选，并继续以新增 union edge 作为入库优先级。
+2. 下一次长程任务不要无限跑；建议每次 1-3 个大轮次为单位执行，记录 AFL union edge 增长率、API/parser error、GroupLLM rejected 率、InstanLLM timeout 和 ICE-like crash。
 3. 增强 oracle：区分 `compile_success`、`compile_failure`、`assembly_scan`、`runtime_exit` 和 `differential`，避免所有测试只按“能编译并有 edge”判定。
 4. 继续降低 GroupLLM rejected 率：把 rejected 原因沉淀成本地 required target arch、test-mode、frontend/harness hard gate，减少无效 LLM 调用。
 5. 接入 corpus admission：只把 covered 且 oracle 合格、或能带来新增 union edge 的程序加入 CI corpus，重复覆盖样例降级为备选语料。
@@ -361,4 +361,4 @@ AFL custom mutator 高频消费
 
 ## 十一、向管理层汇报的建议表述
 
-当前已完成“可插桩、可反馈、可留存、可报告、可语义扩展”的阶段性闭环：LoongArch64 GCC 插桩构建成功，覆盖率反馈和 ICE 识别已验证，历史 Bugzilla 语料已归档，并已通过 ExtractLLM 形成 926 个可组合 feature。当前系统已经能把 AFL 新增 edge 转换为 feature reward，反馈到 GroupLLM 的下一轮组合；InstanLLM 评估已切到 `-Ofast`，用于更集中地测试优化器高风险路径。两轮正式大批量迭代把 covered corpus 从 269 扩到 345，把 `-Ofast` AFL union edge 从 260,124 提升到 288,889（+11.06%），说明该闭环已经能稳定带来覆盖增长。下一阶段重点是提升 InstanLLM 成功率、降低单轮耗时、强化 oracle 和 corpus admission；如果出现 ICE-like crash，再按已制定的 signature/PoC 去重复核流程确认是否为新问题。
+当前已完成“可插桩、可反馈、可留存、可报告、可语义扩展”的阶段性闭环：LoongArch64 GCC 插桩构建成功，覆盖率反馈和 ICE 识别已验证，历史 Bugzilla 语料已归档，并已通过 ExtractLLM 形成 926 个可组合 feature。当前系统已经能把 AFL 新增 edge 转换为 feature reward，反馈到 GroupLLM 的下一轮组合；InstanLLM 评估已切到 `-Ofast`，用于更集中地测试优化器高风险路径。五轮正式大批量迭代把 covered corpus 从 269 扩到 471，把 `-Ofast` AFL union edge 从 260,124 提升到 299,954（+15.31%），说明该闭环已经能稳定带来覆盖增长；其中 08-13 并发三轮把单轮耗时降到约 1 小时。下一阶段重点是提升 oracle、修复 not-ready/rejected、补齐专用 harness 和 corpus admission；如果出现 ICE-like crash，再按已制定的 signature/PoC 去重复核流程确认是否为新问题。
