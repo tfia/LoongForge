@@ -1,0 +1,3 @@
+docs/internal/** export-ignore
+*.log export-ignore
+.DS_Store export-ignore

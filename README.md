@@ -7,7 +7,7 @@ This repository is for compiler quality testing only. The target is our own GCC 
 ## Repository Layout
 
 ```text
-docs/                      Project notes, handoff docs, and CI usage docs
+docs/                      Reproduction guide, delivery notes, reports, and CI usage docs
 scripts/                   GCC/AFL++ build, fuzzing, showmap, and report helpers
 gcc-bugzilla-loongarch/    Bugzilla collection and archive tooling
 extract-llm/               Bug report to feature extraction pipeline
@@ -35,9 +35,23 @@ Their exact revisions are recorded by the submodule gitlinks and summarized in `
 
 ## Current Pipeline State
 
-The current GroupLLM state is documented in `group-llm/WORKING_CONTEXT.md`. Curated machine-readable snapshots are kept under `data/curated/group-llm/`; raw responses and run outputs remain under ignored `group-llm/out/`.
+Curated machine-readable GroupLLM snapshots are kept under `data/curated/group-llm/`; raw responses and run outputs remain under ignored `group-llm/out/`.
 
 `instan-llm/` is the next stage. It reads ready GroupLLM records, asks InstanLLM to generate complete test programs, then evaluates C/C++ programs with the AFL++ wrapped GCC frontend and records edge coverage before admitting a program into the covered corpus.
+
+## Reproduce in a New Environment
+
+Start here:
+
+- `docs/项目交付说明.md`: what is included in the delivery package and what is intentionally excluded.
+- `docs/复现指南.md`: end-to-end environment setup, source checkout, build, test, and pipeline replay.
+- `docs/阶段结果摘要.md`: stable stage results suitable for project reporting.
+
+Basic local validation:
+
+```bash
+./scripts/run-basic-tests.sh
+```
 
 ## Local Environment
 

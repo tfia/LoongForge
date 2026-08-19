@@ -311,76 +311,6 @@ AFL edge 结果：
 
 并发优化后，GroupLLM 并发为 6、InstanLLM 并发为 4。第 1 并发轮初跑 timeout 的 5 个子任务已补跑成功；第 2/3 轮放宽 process timeout 到 720 秒后没有再出现 process timeout。三轮 edge 增量递减，说明当前 corpus 已开始进入边际收益下降区间，后续应优先提高 oracle、补齐专用 harness、降低 not-ready/rejected，而不是单纯无限加轮数。
 
-## 2026-08-19 打开 AFL++ 原生变异后的两轮对比
-
-本轮按要求只使用当前 LoongArch feature pool，新增打开 AFL++ 原生 fuzz 的可选阶段。运行命令：
-
-```bash
-scripts/run-afl-feedback-loop.py \
-  --iterations 2 \
-  --batch-size 48 \
-  --group-parallel 6 \
-  --group-api-timeout 180 \
-  --group-process-timeout 720 \
-  --group-retries 2 \
-  --group-max-tokens 32000 \
-  --group-max-witness-chars 1800 \
-  --instan-workers 4 \
-  --instan-timeout 180 \
-  --instan-process-timeout 720 \
-  --instan-retries 3 \
-  --instan-max-tokens 32000 \
-  --evaluate-timeout-ms 30000 \
-  --optimization=-Ofast \
-  --coverage-basis ready \
-  --native-afl-seconds 180 \
-  --native-afl-languages c \
-  --native-afl-timeout 5000+
-```
-
-日志目录：`/Users/mac/work/loong-gcc-afl/logs/afl-feedback-loop/20260819-163452`。
-
-### 与不开原生 fuzz 的历史结果对比
-
-| 运行口径 | 轮数 | candidates | GroupLLM ready | InstanLLM/AFL covered | AFL union edge 起点 | AFL union edge 终点 | 新增 edge | ICE | 近似 wall time |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 08-13 showmap-only 并发三轮 | 3 | 144 | 133 | 126 | 288,889 | 299,954 | +11,065 | 0 | 约 3.04 小时 |
-| 08-19 native AFL enabled 两轮 | 2 | 96 | 23 | 13 | 299,954 | 307,099 | +7,145 | 0 | 约 2.10 小时 |
-
-注意：08-19 两轮的 GroupLLM ready 率明显低于 08-13，并非 native AFL 阶段导致，而是当前 provider 在 GroupLLM 并发 6、`--group-api-timeout 180` 下出现大量读超时。两轮 GroupLLM 进程返回码均为 0，但输出状态中分别有 33 和 32 个 `api_error`，错误均为 `DeepSeek request failed: The read operation timed out`。
-
-### 08-19 分轮结果
-
-| 轮次 | GroupLLM 状态 | InstanLLM/AFL 状态 | native AFL seed | native AFL queue inputs | native AFL queue edges | union edge 起点 | union edge 终点 | 新增 edge | ICE |
-| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 第 1 轮 | ready 13 / rejected 2 / api_error 33 | covered 9 / skipped_not_ready 4 | 9 | 1,336 | 125,507 | 299,954 | 304,942 | +4,988 | 0 |
-| 第 2 轮 | ready 10 / rejected 5 / validation_error 1 / api_error 32 | covered 4 / skipped_not_ready 6 | 4 | 1,437 | 87,268 | 304,942 | 307,099 | +2,157 | 0 |
-| 合计 | ready 23 / rejected 7 / validation_error 1 / api_error 65 | covered 13 / skipped_not_ready 10 | 13 | 2,773 | - | 299,954 | 307,099 | +7,145 | 0 |
-
-### 新增 edge 归因拆分
-
-| 来源 | feedback rows | edge entries sum | 对 union 的新增 edge |
-| --- | ---: | ---: | ---: |
-| InstanLLM showmap per-group | 18 | 349,262 | +1,135 |
-| native AFL queue map batch-level | 2 | 212,775 | +6,043 |
-| 合计近似 | 20 | 562,037 | +7,178 |
-
-合计近似值比两轮 union delta `+7,145` 多 33 条，来自全局 feedback 重新构建时历史 evaluation 顺序和本轮 run-summary 采样窗口的边界差异；趋势判断不受影响。关键结论是：本次打开 native AFL 后，新增覆盖主要来自 AFL++ 原生变异队列，而不是单纯来自 LLM 新生成样例。
-
-native AFL 自身健康指标：
-
-| 轮次 | execs_done | execs_per_sec | corpus_count | corpus_found | AFL edges_found | bitmap_cvg | stability | crashes | hangs |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 第 1 轮 | 25,245 | 140.19 | 1,331 | 1,322 | 125,510 | 8.21% | 99.99% | 0 | 0 |
-| 第 2 轮 | 27,498 | 152.75 | 1,436 | 1,432 | 87,279 | 5.71% | 100.00% | 0 | 0 |
-
-解读：
-
-- 原生 AFL 阶段已经成功接入同一 feedback 链路：`group_llm feedback` 读取 `native-afl-runs.jsonl`，把 queue-level 新增 edge 合入 `feature-afl-rewards.jsonl`，下一轮 GroupLLM 会消费同一 reward 文件。
-- 08-13 showmap-only 已进入边际递减区间，三轮平均每个 covered 新增约 87.8 edges；08-19 在 ready 率很低、只有 13 个 covered seed 的情况下仍新增 +7,145 edges，说明 AFL 原生变异能从 LLM seed 中继续挖出不少编译器路径。
-- 但当前收益受 provider 超时强烈限制。若下一轮目标是提高端到端效率，应优先把 GroupLLM 并发从 6 降到 3-4，或把 `--group-api-timeout` 提高到 300、`--group-retries` 提高到 3，再观察 ready 率；native AFL 本身运行健康，无 crashes/hangs。
-- 本轮仍未发现 ICE-like crash。若后续 native AFL queue 中出现 crash，仍要按 signature、source bug PoC 和最小化复核，先判断是否为已知历史 bug 的再覆盖。
-
 ## ICE / crash 处理口径
 
 当前 InstanLLM evaluator 已把 GCC `ICE_EXIT_CODE=4` 识别为 `evaluation_status="ice"`。这一步只说明“被测 GCC 前端在该 generated program 上出现了 ICE-like crash”，不能直接宣布发现新 bug。
@@ -418,13 +348,7 @@ scripts/run-afl-feedback-loop.py \
 
 如果要回到旧口径，省略 `--native-afl-seconds` 或设为 `0` 即可。
 
-2026-08-12 尝试进入长程前，DeepSeek provider 出现明显不稳定：
-
-- 低 timeout 小批：4/4 为 `DeepSeek request failed: The read operation timed out`；
-- 提高 timeout 后重跑：出现 `DeepSeek response content was empty` parse_error，并且剩余请求长时间无返回；
-- 按操作策略已暂停大批量 LLM 消耗，等待更换 provider 或恢复服务稳定后继续。
-
-恢复后建议先跑 1 轮 8-16 个 group 的校准批；若 ready 率、parse_error 和 api_error 正常，再启动 3 轮以上大批量正式长程任务。
+正式长程运行前建议先跑 1 轮 8-16 个 group 的 provider smoke test；若 ready 率、parse_error 和 api_error 正常，再启动 1-3 个大轮次。若当前 provider 出现大量 read timeout 或空响应，应暂停 LLM 消耗并切换 provider 或降低并发后重试。
 
 ## 下一步
 

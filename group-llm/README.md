@@ -132,7 +132,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 本次真实 DeepSeek 运行对 926 条 ExtractLLM feature 做了全量候选覆盖，并完成一轮针对未 ready feature 的重新组合。最终结果为：
 
-详细术语、分组构成、`candidate-only` 口径和后续 session 接管信息见 [`WORKING_CONTEXT.md`](WORKING_CONTEXT.md)。
+可复现实验使用的精简快照见 `../data/curated/group-llm/`。该目录只保留 ready groups、coverage manifest 和 candidate-only backlog；完整 raw responses 和中间运行目录仍位于本地忽略目录 `out/`，不随交付包发布。
 
 - 492 个候选，926/926 feature 至少被采样一次，candidate 覆盖率 100%；
 - 289 个 ready feature groups；
