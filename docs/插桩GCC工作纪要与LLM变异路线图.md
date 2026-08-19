@@ -40,6 +40,8 @@ scripts/run-afl-feedback-loop.py \
   --native-afl-timeout 5000+
 ```
 
+同日已完成 2 轮 native AFL enabled 大闭环实测，日志目录为 `logs/afl-feedback-loop/20260819-163452`。在当前 provider 状态下，GroupLLM 并发 6 出现较多读超时：两轮 96 个 candidates 中 only 23 ready，65 个 `api_error` 均为 `DeepSeek request failed: The read operation timed out`。尽管 ready 率偏低，13 个 covered seed 加上每轮 180 秒 native AFL 仍把 AFL union edge 从 299,954 提升到 307,099，新增 +7,145；其中 native AFL queue map 贡献约 +6,043，InstanLLM showmap per-group 贡献约 +1,135。两轮 native AFL queue inputs 分别为 1,336 和 1,437，crashes/hangs 均为 0，ICE=0。结论：原生 AFL 变异阶段已经有效打通并显著提高 edge 增长，但下一轮若要提高端到端效率，应优先降低 GroupLLM 并发到 3-4 或提高 `--group-api-timeout`/`--group-retries`，避免 provider 超时吞掉候选。
+
 InstanLLM 后续 roadmap：
 
 1. 固化 AFL feedback-guided C/C++ 迭代：保留当前 471 个 covered 程序作为 CI corpus 候选，并继续以新增 union edge 作为入库优先级。
