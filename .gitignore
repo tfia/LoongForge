@@ -38,6 +38,7 @@ instan-llm/out/
 
 # Local crawled/generated archives; keep manifests or curated exports under data/.
 gcc-bugzilla-loongarch/archive/
+gcc-bugzilla-loongarch/archive-general-quality*/
 
 # Compiler and native build products
 *.o

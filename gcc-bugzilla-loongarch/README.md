@@ -34,22 +34,39 @@ uv run ./fetch_loongarch_bugs.py sync
 uv run loongarch-bug-corpus sync \
   --scope general-quality \
   --archive-dir archive-general-quality \
+  --general-created-after 2020-01-01 \
   --general-query-limit 80 \
   --general-quality-min-score 6 \
-  --limit 120 \
-  --delay 1.5
+  --limit 40 \
+  --delay 5.0 \
+  --timeout 180 \
+  --retries 6 \
+  --retry-max-delay 90
 uv run loongarch-bug-corpus verify --archive-dir archive-general-quality
 ```
 
 筛选标准：
 
 - Bugzilla 产品限定为 GCC；
+- 正式首批归档建议加 `--general-created-after 2020-01-01`，优先采样较新的 GCC bug，避免古早报告包含大量历史评论、附件和重复讨论拖慢抓取；
 - discovery query 优先搜索 ICE/internal compiler error、wrong-code/miscompilation、missed optimization、reduced testcase 等高价值信号；
 - 本地质量分数综合 description、可抽取 testcase、reduced/preprocessed source、命令行、regression、compiler component、resolution 等信号；
 - `INVALID`/`MOVED` 不进入 LLM 数据集；
 - 通用输出写入 `llm-general-ready.jsonl` 和 `llm-general-dataset.jsonl`，不污染原有 LoongArch 专用 `llm-dataset.jsonl` / `llm-expanded-dataset.jsonl`。
 
-默认 `--general-query-limit 80` 是每条 discovery query 的上限，适合先抓数百级别候选；`--limit` 可用于开发烟测。通用全文 query 比 LoongArch 定向 query 更容易触发 Bugzilla 限流，建议设置 `--delay 1.5` 或更高。正式扩量时建议分批运行并观察 `general_quality_score`、testcase 数量和 ExtractLLM 的 parser/error 率，而不是一次性镜像全库。
+默认 `--general-query-limit 80` 是每条 discovery query 的上限；`--limit` 控制本轮实际归档的 bug 数。通用全文 query 比 LoongArch 定向 query 更慢，也更容易触发 Bugzilla 限流，因为它要在全库公开评论中搜索。首批真实归档推荐 `--limit 40 --delay 5.0 --retries 6 --retry-max-delay 90`：通常能把 40 条控制在几十分钟级；如果仍遇到 429，再把 `--delay` 提高到 `8.0` 或 `10.0`，不要直接改成几十秒。正式扩量时建议分批运行并观察 `general_quality_score`、testcase 数量、ExtractLLM parser/error 率和后续 AFL edge 增益，而不是一次性镜像全库。
+
+如果只是开发烟测，用更小规模即可：
+
+```bash
+uv run loongarch-bug-corpus sync \
+  --scope general-quality \
+  --archive-dir /tmp/gcc-bugzilla-general-smoke \
+  --general-created-after 2020-01-01 \
+  --general-query-limit 20 \
+  --limit 5 \
+  --delay 3.0
+```
 
 ## 数据范围与分层筛选
 

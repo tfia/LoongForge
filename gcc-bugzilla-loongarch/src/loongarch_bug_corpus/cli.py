@@ -10,6 +10,7 @@ from typing import Optional, Sequence
 
 from .core import (
     DEFAULT_BASE_URL,
+    DEFAULT_GENERAL_CREATED_AFTER,
     DEFAULT_GENERAL_QUERY_LIMIT,
     DEFAULT_GENERAL_QUALITY_MIN_SCORE,
     DEFAULT_USER_AGENT,
@@ -46,6 +47,13 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument("--user-agent", default=DEFAULT_USER_AGENT)
     sync.add_argument("--delay", type=float, default=0.4, help="minimum delay between HTTP requests")
     sync.add_argument("--timeout", type=float, default=60.0)
+    sync.add_argument("--retries", type=int, default=4, help="number of attempts for transient Bugzilla errors")
+    sync.add_argument(
+        "--retry-max-delay",
+        type=float,
+        default=90.0,
+        help="maximum backoff seconds between retries after transient Bugzilla errors",
+    )
     sync.add_argument("--max-attachment-bytes", type=int, default=5_000_000)
     sync.add_argument("--refresh", action="store_true", help="refetch unchanged reports")
     sync.add_argument("--limit", type=int, default=0, help="development only: process first N bugs")
@@ -66,6 +74,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_GENERAL_QUALITY_MIN_SCORE,
         help="minimum local quality score for llm-general-dataset.jsonl",
+    )
+    sync.add_argument(
+        "--general-created-after",
+        default=DEFAULT_GENERAL_CREATED_AFTER,
+        help="for --scope general-quality, only discover bugs created at or after this date, e.g. 2020-01-01",
     )
 
     verify = subparsers.add_parser("verify", help="verify scope, indexes, test cases, and checksums")
@@ -88,6 +101,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if (
                 args.delay < 0
                 or args.timeout <= 0
+                or args.retries <= 0
+                or args.retry_max_delay <= 0
                 or args.max_attachment_bytes <= 0
                 or args.limit < 0
                 or args.general_query_limit <= 0
@@ -102,12 +117,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 user_agent=args.user_agent,
                 delay_seconds=args.delay,
                 timeout_seconds=args.timeout,
+                retries=args.retries,
+                max_retry_delay_seconds=args.retry_max_delay,
                 max_attachment_bytes=args.max_attachment_bytes,
                 refresh=args.refresh,
                 limit=args.limit,
                 corpus_scope=args.scope,
                 general_query_limit=args.general_query_limit,
                 general_quality_min_score=args.general_quality_min_score,
+                general_created_after=args.general_created_after,
             )
             print(json.dumps(manifest["counts"], ensure_ascii=False, indent=2, sort_keys=True))
             print(f"manifest: {args.archive_dir.resolve() / 'manifest.json'}")

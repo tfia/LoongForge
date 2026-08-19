@@ -358,7 +358,27 @@ AFL custom mutator 高频消费
 - `/Users/mac/work/loong-gcc-afl/extract-llm/README.md`：复现命令、质量边界和使用说明。
 
 
-2026-08-19 根据领导关于“通用 GCC bug 是否更适合提炼高质量 feature”的问题，爬虫设计扩展为双模式：默认 `loongarch` 模式保持现有 LoongArch 专项口径；新增 `general-quality` 模式按 ICE、wrong-code/miscompilation、missed optimization、reduced testcase、preprocessed source、命令行、regression 和 compiler component 等信号，从 GCC Bugzilla 中抽样抓取通用高质量 bug。通用数据单独输出到 `llm-general-ready.jsonl` 和 `llm-general-dataset.jsonl`，不会污染 LoongArch 专用数据集。建议先以每个 query 80 条、总量百级别的规模试跑，再观察 ExtractLLM feature 数量、parser error 和后续 AFL edge 增益决定是否扩量。
+2026-08-19 根据领导关于“通用 GCC bug 是否更适合提炼高质量 feature”的问题，爬虫设计扩展为双模式：默认 `loongarch` 模式保持现有 LoongArch 专项口径；新增 `general-quality` 模式按 ICE、wrong-code/miscompilation、missed optimization、reduced testcase、preprocessed source、命令行、regression 和 compiler component 等信号，从 GCC Bugzilla 中抽样抓取通用高质量 bug。通用数据单独输出到 `llm-general-ready.jsonl` 和 `llm-general-dataset.jsonl`，不会污染 LoongArch 专用数据集。
+
+通用 Bugzilla 抓取比 LoongArch 专项抓取慢很多是符合预期的：LoongArch 模式搜索范围窄，候选少；通用模式要对 GCC 产品的摘要和公开评论全文做多条 discovery query，并且每个候选还要补抓 comments、attachments 和 testcase。首次真实尝试中，过于保守的 `--delay 30.0` 会把 40 条归档拖到数小时量级；同时如果不限制创建时间，全文搜索会纳入很早创建、后来又被更新的历史 bug，例如编号很小但 `last_change_time` 很新的报告。为此爬虫新增 `--general-created-after`，首批真实归档推荐只采样较新的 bug：
+
+```bash
+cd /Users/mac/work/loong-gcc-afl/gcc-bugzilla-loongarch
+uv run loongarch-bug-corpus sync \
+  --scope general-quality \
+  --archive-dir archive-general-quality \
+  --general-created-after 2020-01-01 \
+  --general-query-limit 80 \
+  --general-quality-min-score 6 \
+  --limit 40 \
+  --delay 5.0 \
+  --timeout 180 \
+  --retries 6 \
+  --retry-max-delay 90
+uv run loongarch-bug-corpus verify --archive-dir archive-general-quality
+```
+
+如果这组参数仍遇到 GCC Bugzilla 429，再把 `--delay` 调到 `8.0` 或 `10.0`；不要一开始使用 30 秒级 delay。建议每批 40 到 80 条，分批观察 `general_quality_score`、testcase 数量、ExtractLLM parser/error 率和后续 AFL edge 增益，再决定是否扩量。
 
 这一步把“历史 bug report + PoC + fix history”转成了可采样、可组合、可审计的语义 feature 池。下一步可以基于 feature pool 做离线组合生成：先按 compiler area、target option、failure mode 采样组合，再由 LLM/结构化生成器产出候选 C/C++ 测试，最后用当前 AFL showmap wrapper 做覆盖筛选，只有带来新增覆盖或触发 ICE 的样例进入 CI corpus。
 

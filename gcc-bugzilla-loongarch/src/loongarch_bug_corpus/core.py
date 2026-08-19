@@ -146,6 +146,7 @@ COMMENT_FAILURE_CONTEXT_RADIUS = 320
 
 DEFAULT_GENERAL_QUERY_LIMIT = 80
 DEFAULT_GENERAL_QUALITY_MIN_SCORE = 6
+DEFAULT_GENERAL_CREATED_AFTER = ""
 GENERAL_QUALITY_COMPONENTS = {
     "middle-end",
     "target",
@@ -598,6 +599,7 @@ class BugzillaClient:
     delay_seconds: float = 0.4
     timeout_seconds: float = 60.0
     retries: int = 4
+    max_retry_delay_seconds: float = 90.0
 
     def __post_init__(self) -> None:
         self._last_request = 0.0
@@ -638,8 +640,19 @@ class BugzillaClient:
                 }
                 if not retryable or attempt + 1 == self.retries:
                     break
-                time.sleep(min(8.0, 2.0**attempt))
+                time.sleep(self._retry_delay(error, attempt))
         raise CorpusError(f"failed to fetch {url}: {last_error}")
+
+    def _retry_delay(self, error: BaseException, attempt: int) -> float:
+        if isinstance(error, urllib.error.HTTPError) and error.code == 429:
+            retry_after = error.headers.get("Retry-After") if error.headers else None
+            if retry_after:
+                try:
+                    return min(self.max_retry_delay_seconds, max(self.delay_seconds, float(retry_after)))
+                except ValueError:
+                    pass
+            return min(self.max_retry_delay_seconds, max(self.delay_seconds * 2.0, 15.0 * (attempt + 1)))
+        return min(self.max_retry_delay_seconds, max(self.delay_seconds, 2.0**attempt))
 
 
 def bug_comments(payload: Dict[str, Any], bug_id: int) -> List[Dict[str, Any]]:
@@ -1282,14 +1295,18 @@ def sync_archive(
     user_agent: str = DEFAULT_USER_AGENT,
     delay_seconds: float = 0.4,
     timeout_seconds: float = 60.0,
+    retries: int = 4,
+    max_retry_delay_seconds: float = 90.0,
     max_attachment_bytes: int = 5_000_000,
     refresh: bool = False,
     limit: int = 0,
     corpus_scope: str = "loongarch",
     general_query_limit: int = DEFAULT_GENERAL_QUERY_LIMIT,
     general_quality_min_score: int = DEFAULT_GENERAL_QUALITY_MIN_SCORE,
+    general_created_after: str = DEFAULT_GENERAL_CREATED_AFTER,
 ) -> Dict[str, Any]:
     archive_dir = archive_dir.resolve()
+    general_created_after = general_created_after.strip()
     archive_dir.mkdir(parents=True, exist_ok=True)
     raw_dir = archive_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -1298,6 +1315,8 @@ def sync_archive(
         user_agent=user_agent,
         delay_seconds=delay_seconds,
         timeout_seconds=timeout_seconds,
+        retries=retries,
+        max_retry_delay_seconds=max_retry_delay_seconds,
     )
 
     if corpus_scope not in {"loongarch", "general-quality"}:
@@ -1353,6 +1372,8 @@ def sync_archive(
         if general_query_limit <= 0:
             raise CorpusError("general query limit must be positive")
         general_common = {**common, "product": "gcc", "limit": general_query_limit}
+        if general_created_after:
+            general_common["creation_time"] = general_created_after
         for raw_name, source_name, query in GENERAL_DISCOVERY_QUERIES:
             payload = client.get_json("bug", {**general_common, **query})
             write_json_atomic(raw_dir / raw_name, payload)
@@ -1362,7 +1383,14 @@ def sync_archive(
                 candidates[bug_id] = bug
                 discovery_sources.setdefault(bug_id, []).append(source_name)
 
-    ordered = [candidates[bug_id] for bug_id in sorted(candidates)]
+    if corpus_scope == "general-quality":
+        ordered = sorted(
+            candidates.values(),
+            key=lambda bug: (str(bug.get("last_change_time") or ""), int(bug["id"])),
+            reverse=True,
+        )
+    else:
+        ordered = [candidates[bug_id] for bug_id in sorted(candidates)]
     if limit > 0:
         ordered = ordered[:limit]
 
@@ -1410,6 +1438,7 @@ def sync_archive(
         "corpus_scope": corpus_scope,
         "general_query_limit": general_query_limit if corpus_scope == "general-quality" else None,
         "general_quality_min_score": general_quality_min_score,
+        "general_created_after": general_created_after if corpus_scope == "general-quality" else None,
         "source": "GCC Bugzilla public REST API",
         "base_url": base_url,
         "bugzilla_version": version_payload.get("version"),
