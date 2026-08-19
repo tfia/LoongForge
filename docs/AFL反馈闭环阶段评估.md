@@ -16,6 +16,7 @@
    - `group-llm/out/feature-groups.jsonl`
    - `instan-llm/out/evaluations.jsonl`
    - `instan-llm/out/coverage/*.map`
+   - 可选的 `group-llm/out/afl-feedback/native-afl-runs.jsonl`
 2. 对每个 covered group 计算：
    - 单测例 edge entries；
    - 相对历史 union edge 的新增 edge；
@@ -25,11 +26,18 @@
    - `group-llm/out/afl-feedback/group-afl-feedback.jsonl`
    - `group-llm/out/afl-feedback/feature-afl-rewards.jsonl`
    - `group-llm/out/afl-feedback/novel-glue-features.jsonl`
-4. `group_llm prepare` 自动读取上述 `feature-afl-rewards.jsonl`，在后续候选采样中提高高 reward feature 的优先级。
+4. 如果启用 AFL++ 原生变异阶段，则在 InstanLLM showmap 评估后运行 `afl-fuzz`，再用 `afl-showmap` 重放 AFL queue，生成 queue-level edge map。该 map 的新增 edge 作为 batch-level feedback 合入 union edge，并平均分配给本轮 seed batch 对应的 source features。
+5. `group_llm prepare` 自动读取上述 `feature-afl-rewards.jsonl`，在后续候选采样中提高高 reward feature 的优先级。
 
 核心原则：AFL edge feedback 只服务当前可执行的 LoongArch C/C++ AFL harness。Fortran/Ada/D/COBOL/shell、其他 target 架构、build/link 级专用场景不会被无差别混入当前反馈迭代。
 
 当前 InstanLLM 评估口径已按质量测试要求切到更激进的优化路径：默认用 `-Ofast` 重放 generated programs。实现方式是在 AFL showmap 评估前统一清理原有 `-O*` 选项并前置 `-Ofast`；如需要复现实验中的原始模型选项，可显式传 `--optimization=preserve`。
+
+2026-08-19 已新增可选 AFL++ native mutation 阶段。默认不开启，保持历史 showmap-only 大闭环；传入 `--native-afl-seconds N` 后，每轮会把本轮 InstanLLM covered 的 C/C++ 程序复制成 seed corpus，调用 `scripts/run-gcc-afl-fuzz.sh` 运行原生 `afl-fuzz`，然后用 `scripts/afl-coverage-report.sh` 重新计算 queue coverage。反馈归因粒度如下：
+
+- InstanLLM showmap：per-group 归因，适合计算每个 feature group 的直接新增 edge；
+- native AFL queue map：batch-level 归因，因为 AFL queue 中多代变异样例不总能可靠还原到唯一 source feature，所以新增 edge 平均分给本轮 seed batch 的 source features；
+- 两者最终进入同一个 `feature-afl-rewards.jsonl`，下一轮 GroupLLM 仍通过同一 reward 机制采样。
 
 ## reward 如何计算
 
@@ -325,13 +333,20 @@ AFL edge 结果：
 scripts/run-afl-feedback-loop.py \
   --iterations 3 \
   --batch-size 48 \
-  --group-parallel 2 \
-  --group-api-timeout 300 \
-  --group-process-timeout 360 \
-  --optimization=-Ofast
+  --group-parallel 6 \
+  --group-api-timeout 180 \
+  --group-process-timeout 720 \
+  --instan-workers 4 \
+  --instan-process-timeout 720 \
+  --optimization=-Ofast \
+  --native-afl-seconds 180 \
+  --native-afl-languages c \
+  --native-afl-timeout 5000+
 ```
 
 这个脚本仍然调用原有 `group_llm prepare/run/build-groups`、`instan_llm run/evaluate` 和 `group_llm feedback`，只是提供分轮、分组、日志和超时保护。它不是新的管线模式。
+
+如果要回到旧口径，省略 `--native-afl-seconds` 或设为 `0` 即可。
 
 2026-08-12 尝试进入长程前，DeepSeek provider 出现明显不稳定：
 

@@ -19,6 +19,27 @@
 
 2026-08-12 已完成两轮有效大批量 `-Ofast` feedback loop：covered corpus 从 269 增至 345，AFL union edge 从 260,124 增至 288,889，累计新增 28,765 edges（+11.06%），未发现 ICE。2026-08-13 更换 provider 后提高并发继续执行 3 个大轮次：GroupLLM 并发从 4 提到 6，InstanLLM 并发从 2 提到 4，并把 process timeout 放宽到 720 秒；第 1 并发轮的 timeout 已补跑成功。三轮新增 covered 126 个，AFL union edge 从 288,889 提升到 299,954，新增 11,065 edges；相对 `-Ofast` 初始基线累计新增 39,830 edges（+15.31%）。三轮均未发现 ICE-like crash（`ice=0`）。并发优化后三轮含补跑总 wall time 约 3.04 小时，单轮约 0.95-1.08 小时，较此前 2.4-2.6 小时/轮明显提速；edge 增长依次为 +7,292、+2,228、+1,545，显示覆盖进入边际递减区间。
 
+2026-08-19 进一步给长程 runner 增加 AFL++ 原生变异开关：默认仍是原来的 showmap-only 反馈闭环；传 `--native-afl-seconds N` 后，每轮在 InstanLLM evaluate 后把本轮 covered 程序作为 seed corpus，调用原生 `afl-fuzz` 运行 N 秒，再用 `afl-showmap` 重放 AFL queue 并把 queue-level edge map 合入 GroupLLM feedback。InstanLLM showmap 仍提供 per-group reward；native AFL queue map 属于 batch-level reward，新增 edge 平均分给本轮 seed batch 的 source features。推荐较快大轮次命令使用 GroupLLM 并发 6、InstanLLM 并发 4，并把 native AFL 先设为每轮 180 秒：
+
+```bash
+cd /Users/mac/work/loong-gcc-afl
+scripts/run-afl-feedback-loop.py \
+  --iterations 2 \
+  --batch-size 48 \
+  --group-parallel 6 \
+  --group-api-timeout 180 \
+  --group-process-timeout 720 \
+  --instan-workers 4 \
+  --instan-process-timeout 720 \
+  --instan-timeout 180 \
+  --evaluate-timeout-ms 30000 \
+  --optimization=-Ofast \
+  --coverage-basis ready \
+  --native-afl-seconds 180 \
+  --native-afl-languages c \
+  --native-afl-timeout 5000+
+```
+
 InstanLLM 后续 roadmap：
 
 1. 固化 AFL feedback-guided C/C++ 迭代：保留当前 471 个 covered 程序作为 CI corpus 候选，并继续以新增 union edge 作为入库优先级。

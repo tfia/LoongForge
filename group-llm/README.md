@@ -191,6 +191,8 @@ PYTHONPATH=src python3 -m group_llm feedback \
 
 该命令读取 InstanLLM 的 AFL edge maps，计算每个 ready group 对 union edge 的增量贡献，并把 reward 拆分到 source features。输出位于 `out/afl-feedback/`，其中 `feature-afl-rewards.jsonl` 会被后续 `prepare` 自动读取，用于提高高价值 feature 在下一轮组合中的采样概率。
 
+如果长程 runner 启用了 AFL++ 原生变异阶段，`group_llm feedback` 还会读取 `out/afl-feedback/native-afl-runs.jsonl`。这类记录来自 `afl-fuzz` 对本轮 covered seed corpus 的 queue replay，属于 batch-level feedback：原生 AFL queue map 的新增 edge 会合入全局 union edge，并平均分配给本轮 seed batch 对应的 source features。它不替代 InstanLLM 的 per-group showmap 归因，而是补充“原生 AFL 在这些 LLM seed 上还能继续打开哪些编译器路径”的信号。
+
 reward 公式：
 
 ```text

@@ -14,6 +14,7 @@ import concurrent.futures
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -29,6 +30,7 @@ GROUP_OUT = GROUP_DIR / "out"
 INSTAN_OUT = INSTAN_DIR / "out"
 GROUPS_FILE = GROUP_OUT / "feature-groups.jsonl"
 FEEDBACK_MANIFEST = GROUP_OUT / "afl-feedback" / "afl-feedback-manifest.json"
+NATIVE_AFL_RUNS_FILE = GROUP_OUT / "afl-feedback" / "native-afl-runs.jsonl"
 EVALUATIONS_FILE = INSTAN_OUT / "evaluations.jsonl"
 LOG_ROOT = PROJECT_ROOT / "logs" / "afl-feedback-loop"
 
@@ -57,6 +59,12 @@ def write_json(path: Path, value: Mapping) -> None:
     with path.open("w", encoding="utf-8") as handle:
         json.dump(dict(value), handle, ensure_ascii=False, indent=2, sort_keys=True)
         handle.write("\n")
+
+
+def append_jsonl(path: Path, value: Mapping) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(dict(value), ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def module_env(component: str) -> dict:
@@ -141,6 +149,16 @@ def ready_group_ids(ids: Sequence[str]) -> list[str]:
     return ready
 
 
+def group_index() -> dict[str, dict]:
+    groups: dict[str, dict] = {}
+    for row in iter_jsonl(GROUPS_FILE):
+        for key in ("candidate_id", "group_uid"):
+            value = str(row.get(key) or "")
+            if value:
+                groups[value] = row
+    return groups
+
+
 def evaluation_statuses(ids: Sequence[str]) -> collections.Counter:
     wanted = set(ids)
     counts: collections.Counter = collections.Counter()
@@ -190,6 +208,170 @@ def ice_candidates(ids: Sequence[str]) -> list[dict]:
     return result
 
 
+def count_map_entries(path: Path) -> int:
+    if not path.is_file():
+        return 0
+    return sum(1 for line in path.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip())
+
+
+def count_afl_queue_inputs(queue_dir: Path) -> int:
+    if not queue_dir.is_dir():
+        return 0
+    return sum(1 for path in queue_dir.rglob("id:*") if path.is_file())
+
+
+def build_native_afl_seed_corpus(ready_ids: Sequence[str], language: str, seed_dir: Path) -> dict:
+    wanted = set(ready_ids)
+    groups = group_index()
+    seed_dir.mkdir(parents=True, exist_ok=True)
+    copied: list[dict] = []
+    candidate_ids: set[str] = set()
+    group_uids: set[str] = set()
+    source_feature_uids: set[str] = set()
+
+    for evaluation in iter_jsonl(EVALUATIONS_FILE):
+        if evaluation.get("evaluation_status") != "covered":
+            continue
+        candidate_id = str(evaluation.get("candidate_id") or "")
+        if candidate_id not in wanted:
+            continue
+        eval_language = str(evaluation.get("language") or "c")
+        if language == "c++":
+            if eval_language not in {"c++", "cpp", "cxx"}:
+                continue
+        elif eval_language != language:
+            continue
+        source = Path(str(evaluation.get("source_path") or ""))
+        if not source.is_file():
+            continue
+        suffix = source.suffix or (".cc" if language == "c++" else ".c")
+        instantiation_id = str(evaluation.get("instantiation_id") or candidate_id)
+        target = seed_dir / f"{instantiation_id}{suffix}"
+        shutil.copy2(source, target)
+        group_uid = str(evaluation.get("group_uid") or "")
+        group = groups.get(group_uid) or groups.get(candidate_id) or {}
+        candidate_ids.add(candidate_id)
+        if group_uid:
+            group_uids.add(group_uid)
+        source_feature_uids.update(str(uid) for uid in group.get("source_feature_uids", []) if str(uid))
+        copied.append(
+            {
+                "source": str(source),
+                "target": str(target),
+                "candidate_id": candidate_id,
+                "group_uid": group_uid,
+                "language": language,
+            }
+        )
+
+    manifest = {
+        "seed_dir": str(seed_dir),
+        "language": language,
+        "seed_count": len(copied),
+        "candidate_ids": sorted(candidate_ids),
+        "group_uids": sorted(group_uids),
+        "source_feature_uids": sorted(source_feature_uids),
+        "files": copied,
+    }
+    write_json(seed_dir.parent / f"seed-corpus-{language.replace('+', 'p')}.json", manifest)
+    return manifest
+
+
+def run_native_afl_stage(
+    *,
+    iteration: int,
+    ready_ids: Sequence[str],
+    languages: Sequence[str],
+    seconds: int,
+    timeout: str,
+    optimization: str,
+    iter_log: Path,
+) -> list[dict]:
+    if seconds <= 0:
+        return []
+    records: list[dict] = []
+    native_root = iter_log / "native-afl"
+    for language in languages:
+        normalized_language = "c++" if language in {"c++", "cpp", "cxx"} else language
+        seed_manifest = build_native_afl_seed_corpus(
+            ready_ids,
+            normalized_language,
+            native_root / f"seeds-{normalized_language.replace('+', 'p')}",
+        )
+        if int(seed_manifest["seed_count"]) == 0:
+            print(f"[iter {iteration}] native AFL {normalized_language}: skipped, no covered seeds", flush=True)
+            continue
+        run_dir = native_root / f"run-{normalized_language.replace('+', 'p')}"
+        print(
+            f"[iter {iteration}] native AFL {normalized_language}: "
+            f"seeds={seed_manifest['seed_count']} seconds={seconds}",
+            flush=True,
+        )
+        fuzz_proc = run_logged(
+            name=f"05b-native-afl-{normalized_language.replace('+', 'p')}",
+            cwd=PROJECT_ROOT,
+            env=os.environ.copy(),
+            args=[
+                str(PROJECT_ROOT / "scripts" / "run-gcc-afl-fuzz.sh"),
+                "--lang", normalized_language,
+                "--seconds", str(seconds),
+                "--output", str(run_dir),
+                "--timeout", timeout,
+                str(seed_manifest["seed_dir"]),
+                "--",
+                optimization,
+            ],
+            log_dir=iter_log,
+            timeout=seconds + 180,
+            continue_on_error=True,
+        )
+        report_proc = run_logged(
+            name=f"05c-native-afl-report-{normalized_language.replace('+', 'p')}",
+            cwd=PROJECT_ROOT,
+            env=os.environ.copy(),
+            args=[
+                str(PROJECT_ROOT / "scripts" / "afl-coverage-report.sh"),
+                "--lang", normalized_language,
+                "--output", str(run_dir / "coverage-report.md"),
+                str(run_dir),
+                "--",
+                optimization,
+            ],
+            log_dir=iter_log,
+            timeout=300,
+            continue_on_error=True,
+        )
+        queue_dir = run_dir / "default" / "queue"
+        map_path = run_dir / f"queue-coverage-{normalized_language}.map"
+        record = {
+            "schema_version": 1,
+            "generated_at": utc_now(),
+            "native_run_id": f"iter-{iteration:03d}-{normalized_language.replace('+', 'p')}",
+            "quality_scope": "compiler CI quality testing; not security testing",
+            "iteration": iteration,
+            "language": normalized_language,
+            "seconds": seconds,
+            "timeout": timeout,
+            "optimization": optimization,
+            "run_dir": str(run_dir),
+            "queue_dir": str(queue_dir),
+            "map_path": str(map_path),
+            "seed_dir": seed_manifest["seed_dir"],
+            "seed_count": seed_manifest["seed_count"],
+            "queue_inputs": count_afl_queue_inputs(queue_dir),
+            "queue_edges": count_map_entries(map_path),
+            "candidate_ids": seed_manifest["candidate_ids"],
+            "group_uids": seed_manifest["group_uids"],
+            "source_feature_uids": seed_manifest["source_feature_uids"],
+            "fuzz_returncode": fuzz_proc.returncode,
+            "report_returncode": report_proc.returncode,
+        }
+        append_jsonl(NATIVE_AFL_RUNS_FILE, record)
+        write_json(run_dir / "native-afl-feedback-record.json", record)
+        records.append(record)
+    return records
+
+
 def repeated_group_args(ids: Sequence[str]) -> list[str]:
     result: list[str] = []
     for gid in ids:
@@ -221,11 +403,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--evaluate-timeout-ms", type=int, default=20000)
     parser.add_argument("--optimization", default="-Ofast")
     parser.add_argument("--coverage-basis", default="ready")
+    parser.add_argument(
+        "--native-afl-seconds",
+        type=int,
+        default=0,
+        help="run native afl-fuzz for this many seconds after showmap evaluation; 0 disables it",
+    )
+    parser.add_argument(
+        "--native-afl-languages",
+        default="c",
+        help="comma-separated frontend languages for native afl-fuzz, e.g. c or c,c++",
+    )
+    parser.add_argument("--native-afl-timeout", default="5000+")
     parser.add_argument("--log-dir", type=Path, default=None)
     args = parser.parse_args(argv)
 
     if args.iterations <= 0 or args.batch_size <= 0:
         raise SystemExit("iterations and batch-size must be positive")
+    if args.native_afl_seconds < 0:
+        raise SystemExit("native-afl-seconds must be non-negative")
+    native_afl_languages = [
+        item.strip()
+        for item in args.native_afl_languages.split(",")
+        if item.strip()
+    ]
+    if any(item not in {"c", "c++", "cpp", "cxx"} for item in native_afl_languages):
+        raise SystemExit("native-afl-languages must contain only c or c++")
 
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     log_dir = (args.log_dir or LOG_ROOT / run_id).resolve()
@@ -355,6 +558,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 continue_on_error=True,
             )
 
+        native_afl_records = run_native_afl_stage(
+            iteration=iteration,
+            ready_ids=ready_ids,
+            languages=native_afl_languages,
+            seconds=args.native_afl_seconds,
+            timeout=args.native_afl_timeout,
+            optimization=args.optimization,
+            iter_log=iter_log,
+        )
+
         run_logged(
             name="06-feedback",
             cwd=GROUP_DIR,
@@ -363,6 +576,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 sys.executable, "-m", "group_llm", "feedback",
                 "--output-dir", "out",
                 "--instan-output-dir", str(INSTAN_OUT),
+                "--native-afl-runs-file", str(NATIVE_AFL_RUNS_FILE),
             ],
             log_dir=iter_log,
         )
@@ -378,6 +592,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             "union_edges_before": before_edges,
             "union_edges_after": after_edges,
             "union_edges_delta": after_edges - before_edges,
+            "native_afl": {
+                "enabled": args.native_afl_seconds > 0,
+                "seconds": args.native_afl_seconds,
+                "languages": native_afl_languages,
+                "records": native_afl_records,
+                "runs_file": str(NATIVE_AFL_RUNS_FILE),
+            },
             "optimization": args.optimization,
             "quality_scope": "compiler CI quality testing; not security testing",
         }

@@ -124,6 +124,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=(project_root().parent / "instan-llm" / "out").resolve(),
     )
     feedback.add_argument("--feedback-dir", type=Path, default=None)
+    feedback.add_argument(
+        "--native-afl-runs-file",
+        type=Path,
+        default=None,
+        help="optional JSONL records for native afl-fuzz queue coverage to merge into rewards",
+    )
 
     verify = subparsers.add_parser("verify", help="verify candidates, outputs, and ready-group pool")
     verify.add_argument("--output-dir", type=Path, default=project_root() / DEFAULT_OUTPUT_DIR)
@@ -183,6 +189,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 group_output_dir=args.output_dir,
                 instan_output_dir=args.instan_output_dir,
                 feedback_dir=args.feedback_dir,
+                native_afl_runs_file=args.native_afl_runs_file,
             )
             print(json.dumps(manifest["counts"], ensure_ascii=False, indent=2, sort_keys=True))
             print(f"feedback: {Path(manifest['feedback_dir']).resolve()}")

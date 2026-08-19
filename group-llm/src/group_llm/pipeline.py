@@ -657,10 +657,59 @@ def load_group_index(groups_file: Path) -> Dict[str, Dict[str, Any]]:
     return groups
 
 
+def add_feature_rewards(
+    feature_buckets: Dict[str, Dict[str, Any]],
+    *,
+    source_uids: Sequence[str],
+    edge_entries: int,
+    new_edges: int,
+    candidate_ids: Sequence[str],
+    group_uids: Sequence[str],
+) -> None:
+    reward_share = 0.0 if not source_uids else new_edges / len(source_uids)
+    is_novel = new_edges > 0
+    for uid in source_uids:
+        bucket = feature_buckets.setdefault(
+            uid,
+            {
+                "schema_version": SCHEMA_VERSION,
+                "feature_uid": uid,
+                "covered_group_count": 0,
+                "novel_group_count": 0,
+                "edge_entries_sum": 0,
+                "new_edges_sum": 0.0,
+                "max_group_new_edges": 0,
+                "candidate_ids": [],
+                "group_uids": [],
+            },
+        )
+        bucket["covered_group_count"] += 1
+        bucket["edge_entries_sum"] += edge_entries
+        bucket["new_edges_sum"] += reward_share
+        bucket["max_group_new_edges"] = max(bucket["max_group_new_edges"], new_edges)
+        bucket["candidate_ids"].extend(candidate_ids)
+        bucket["group_uids"].extend(group_uids)
+        if is_novel:
+            bucket["novel_group_count"] += 1
+
+
+def native_source_uids(native_run: Mapping[str, Any], groups: Mapping[str, Mapping[str, Any]]) -> List[str]:
+    explicit = [str(uid) for uid in native_run.get("source_feature_uids", []) if str(uid)]
+    if explicit:
+        return sorted(set(explicit))
+    source_uids: Set[str] = set()
+    for key in [str(item) for item in native_run.get("group_uids", []) if str(item)]:
+        source_uids.update(str(uid) for uid in groups.get(key, {}).get("source_feature_uids", []) if str(uid))
+    for key in [str(item) for item in native_run.get("candidate_ids", []) if str(item)]:
+        source_uids.update(str(uid) for uid in groups.get(key, {}).get("source_feature_uids", []) if str(uid))
+    return sorted(source_uids)
+
+
 def build_afl_feedback(
     group_output_dir: Path,
     instan_output_dir: Path,
     feedback_dir: Optional[Path] = None,
+    native_afl_runs_file: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Build AFL edge-coverage rewards for GroupLLM source-feature sampling."""
 
@@ -669,6 +718,9 @@ def build_afl_feedback(
     if feedback_dir is None:
         feedback_dir = group_output_dir / "afl-feedback"
     feedback_dir = feedback_dir.resolve()
+    if native_afl_runs_file is None:
+        native_afl_runs_file = feedback_dir / "native-afl-runs.jsonl"
+    native_afl_runs_file = native_afl_runs_file.resolve()
     groups_file = group_output_dir / "feature-groups.jsonl"
     evaluations_file = instan_output_dir / "evaluations.jsonl"
     if not groups_file.is_file():
@@ -682,6 +734,8 @@ def build_afl_feedback(
     feature_buckets: Dict[str, Dict[str, Any]] = {}
     glue_rows: List[Dict[str, Any]] = []
     covered_count = 0
+    native_runs_count = 0
+    native_runs_with_new_edges = 0
 
     for evaluation_index, evaluation in enumerate(iter_jsonl(evaluations_file), start=1):
         if evaluation.get("evaluation_status") != "covered":
@@ -694,10 +748,10 @@ def build_afl_feedback(
         new_edges = edges - global_edges
         global_edges.update(edges)
         source_uids = [str(uid) for uid in group.get("source_feature_uids", []) if str(uid)]
-        reward_share = 0.0 if not source_uids else len(new_edges) / len(source_uids)
         is_novel = bool(new_edges)
         group_row = {
             "schema_version": SCHEMA_VERSION,
+            "feedback_source": "instan_showmap",
             "evaluation_index": evaluation_index,
             "group_uid": group.get("group_uid"),
             "candidate_id": group.get("candidate_id"),
@@ -712,29 +766,14 @@ def build_afl_feedback(
             "map_path": str(edge_map_path(evaluation)),
         }
         group_rows.append(group_row)
-        for uid in source_uids:
-            bucket = feature_buckets.setdefault(
-                uid,
-                {
-                    "schema_version": SCHEMA_VERSION,
-                    "feature_uid": uid,
-                    "covered_group_count": 0,
-                    "novel_group_count": 0,
-                    "edge_entries_sum": 0,
-                    "new_edges_sum": 0.0,
-                    "max_group_new_edges": 0,
-                    "candidate_ids": [],
-                    "group_uids": [],
-                },
-            )
-            bucket["covered_group_count"] += 1
-            bucket["edge_entries_sum"] += len(edges)
-            bucket["new_edges_sum"] += reward_share
-            bucket["max_group_new_edges"] = max(bucket["max_group_new_edges"], len(new_edges))
-            bucket["candidate_ids"].append(str(group.get("candidate_id") or ""))
-            bucket["group_uids"].append(str(group.get("group_uid") or ""))
-            if is_novel:
-                bucket["novel_group_count"] += 1
+        add_feature_rewards(
+            feature_buckets,
+            source_uids=source_uids,
+            edge_entries=len(edges),
+            new_edges=len(new_edges),
+            candidate_ids=[str(group.get("candidate_id") or "")],
+            group_uids=[str(group.get("group_uid") or "")],
+        )
         if is_novel:
             for glue in group.get("glue_features", []) or []:
                 if not isinstance(glue, dict):
@@ -755,6 +794,54 @@ def build_afl_feedback(
                         "promotion_reason": "parent group produced AFL union-edge gain",
                     }
                 )
+
+    native_runs_iterable = iter_jsonl(native_afl_runs_file) if native_afl_runs_file.is_file() else []
+    for native_index, native_run in enumerate(native_runs_iterable, start=1):
+        map_path = Path(str(native_run.get("map_path") or ""))
+        edges = read_edge_map(map_path)
+        if not edges:
+            continue
+        native_runs_count += 1
+        new_edges = edges - global_edges
+        global_edges.update(edges)
+        if new_edges:
+            native_runs_with_new_edges += 1
+        source_uids = native_source_uids(native_run, groups)
+        candidate_ids = sorted(set(str(item) for item in native_run.get("candidate_ids", []) if str(item)))
+        group_uids = sorted(set(str(item) for item in native_run.get("group_uids", []) if str(item)))
+        group_rows.append(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "feedback_source": "native_afl",
+                "evaluation_index": f"native-{native_index}",
+                "group_uid": None,
+                "candidate_id": str(native_run.get("native_run_id") or f"native-afl-{native_index}"),
+                "instantiation_id": None,
+                "language": native_run.get("language"),
+                "edge_entries": len(edges),
+                "new_edges": len(new_edges),
+                "new_edge_ratio": 0.0 if not edges else round(len(new_edges) / len(edges), 6),
+                "union_edges_after": len(global_edges),
+                "source_feature_uids": source_uids,
+                "promote_new_glue": False,
+                "map_path": str(map_path),
+                "native_afl": {
+                    "run_dir": native_run.get("run_dir"),
+                    "queue_dir": native_run.get("queue_dir"),
+                    "seed_count": native_run.get("seed_count"),
+                    "queue_inputs": native_run.get("queue_inputs"),
+                    "seconds": native_run.get("seconds"),
+                },
+            }
+        )
+        add_feature_rewards(
+            feature_buckets,
+            source_uids=source_uids,
+            edge_entries=len(edges),
+            new_edges=len(new_edges),
+            candidate_ids=candidate_ids,
+            group_uids=group_uids,
+        )
 
     feature_rows = []
     for bucket in feature_buckets.values():
@@ -785,9 +872,12 @@ def build_afl_feedback(
             "group_feedback": str(feedback_dir / "group-afl-feedback.jsonl"),
             "feature_rewards": str(feedback_dir / "feature-afl-rewards.jsonl"),
             "novel_glue_features": str(feedback_dir / "novel-glue-features.jsonl"),
+            "native_afl_runs": str(native_afl_runs_file),
         },
         "counts": {
             "covered_evaluations": covered_count,
+            "native_afl_runs": native_runs_count,
+            "native_afl_runs_with_new_edges": native_runs_with_new_edges,
             "groups_with_feedback": len(group_rows),
             "novel_groups": sum(1 for item in group_rows if item["new_edges"] > 0),
             "rewarded_source_features": len(feature_rows),

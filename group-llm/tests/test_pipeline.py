@@ -416,6 +416,61 @@ class PipelineTests(unittest.TestCase):
             new_candidate = json.loads((group_output / "group-candidates.jsonl").read_text().splitlines()[-1])
             self.assertIn("coverage_feedback", new_candidate)
 
+    def test_afl_feedback_merges_native_afl_queue_maps(self):
+        candidate = self.candidate()
+        group = self.normalized(candidate)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            group_output = root / "group-out"
+            instan_output = root / "instan-out"
+            write_jsonl(group_output / "feature-groups.jsonl", [group])
+            coverage_dir = instan_output / "coverage"
+            coverage_dir.mkdir(parents=True)
+            showmap = coverage_dir / "showmap.map"
+            showmap.write_text("1:1\n", encoding="utf-8")
+            native_map = root / "native.map"
+            native_map.write_text("1:1\n2:1\n3:1\n", encoding="utf-8")
+            write_jsonl(
+                instan_output / "evaluations.jsonl",
+                [
+                    {
+                        "evaluation_status": "covered",
+                        "candidate_id": candidate["candidate_id"],
+                        "group_uid": group["group_uid"],
+                        "instantiation_id": "inst-1",
+                        "language": "c",
+                        "coverage": {"map_path": str(showmap), "edge_map_entries": 1},
+                    }
+                ],
+            )
+            native_runs = root / "native-afl-runs.jsonl"
+            write_jsonl(
+                native_runs,
+                [
+                    {
+                        "native_run_id": "iter-001-c",
+                        "language": "c",
+                        "map_path": str(native_map),
+                        "candidate_ids": [candidate["candidate_id"]],
+                        "group_uids": [group["group_uid"]],
+                        "seed_count": 1,
+                        "queue_inputs": 2,
+                        "seconds": 30,
+                    }
+                ],
+            )
+
+            manifest = build_afl_feedback(group_output, instan_output, native_afl_runs_file=native_runs)
+
+            self.assertEqual(manifest["counts"]["native_afl_runs"], 1)
+            self.assertEqual(manifest["counts"]["native_afl_runs_with_new_edges"], 1)
+            self.assertEqual(manifest["counts"]["union_edges"], 3)
+            rows = [
+                json.loads(line)
+                for line in (group_output / "afl-feedback" / "group-afl-feedback.jsonl").read_text().splitlines()
+            ]
+            self.assertIn("native_afl", {row["feedback_source"] for row in rows})
+
     def test_resumed_run_manifest_reports_full_inventory(self):
         candidate = self.candidate()
         group = self.normalized(candidate)
