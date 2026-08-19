@@ -144,6 +144,41 @@ BROAD_VECTOR_RE = re.compile(
 )
 COMMENT_FAILURE_CONTEXT_RADIUS = 320
 
+DEFAULT_GENERAL_QUERY_LIMIT = 80
+DEFAULT_GENERAL_QUALITY_MIN_SCORE = 6
+GENERAL_QUALITY_COMPONENTS = {
+    "middle-end",
+    "target",
+    "tree-optimization",
+    "rtl-optimization",
+    "c",
+    "c++",
+    "fortran",
+    "libstdc++",
+    "lto",
+    "sanitizer",
+}
+GENERAL_FAILURE_SIGNALS = {
+    "ice": re.compile(r"\b(?:ice|internal compiler error|unrecognizable insn)\b", re.I),
+    "wrong_code": re.compile(r"\b(?:wrong[ -]?code|miscompil(?:e|ation)|incorrect code|runtime failure)\b", re.I),
+    "crash_or_hang": re.compile(r"\b(?:crash|segfault|hang|timeout|infinite loop)\b", re.I),
+    "missed_optimization": re.compile(r"\b(?:missed optimization|missed-optimization|pessimiz|performance regression)\b", re.I),
+}
+GENERAL_REPRO_SIGNALS = {
+    "reduced_testcase": re.compile(r"\b(?:reduced|reducer|creduce|cvise|minimized|minimal)\b", re.I),
+    "preprocessed_source": re.compile(r"\b(?:preprocessed source|\.ii\b|\.i\b)\b", re.I),
+    "command_line": re.compile(r"\b(?:gcc|g\+\+|cc1|cc1plus|compile with|command line)\b[^\n]{0,160}\s-[A-Za-z0-9]", re.I),
+    "regression": re.compile(r"\b(?:regression|known to work|known to fail|started with|bisected)\b", re.I),
+}
+GENERAL_DISCOVERY_QUERIES = (
+    ("search-general-summary-ice.json", "general_summary_ice", {"summary": "ICE"}),
+    ("search-general-comments-internal-compiler-error.json", "general_comment_internal_compiler_error", {"f1": "longdesc", "o1": "substring", "v1": "internal compiler error"}),
+    ("search-general-comments-reduced-testcase.json", "general_comment_reduced_testcase", {"f1": "longdesc", "o1": "substring", "v1": "reduced testcase"}),
+    ("search-general-summary-wrong-code.json", "general_summary_wrong_code", {"summary": "wrong-code"}),
+    ("search-general-comments-miscompilation.json", "general_comment_miscompilation", {"f1": "longdesc", "o1": "substring", "v1": "miscompilation"}),
+    ("search-general-summary-missed-optimization.json", "general_summary_missed_optimization", {"summary": "missed optimization"}),
+)
+
 
 class CorpusError(RuntimeError):
     """Raised for a corpus build or verification failure."""
@@ -328,6 +363,69 @@ def classify_full_relevance(
     return relevance
 
 
+def combined_report_text(report: Dict[str, Any]) -> str:
+    metadata = report.get("metadata") or {}
+    parts = [
+        str(metadata.get("summary") or ""),
+        str(metadata.get("cf_gcctarget") or ""),
+        str(metadata.get("component") or ""),
+        str(metadata.get("cf_known_to_fail") or ""),
+        str(metadata.get("cf_known_to_work") or ""),
+        str(report.get("description") or ""),
+    ]
+    parts.extend(str(comment.get("text") or "") for comment in report.get("comments") or [])
+    for testcase in report.get("testcases") or []:
+        parts.append(str(testcase.get("path") or ""))
+        parts.append(json.dumps(testcase.get("provenance") or {}, ensure_ascii=False))
+    return "\n".join(parts)
+
+
+def classify_general_quality(report: Dict[str, Any]) -> Dict[str, Any]:
+    metadata = report.get("metadata") or {}
+    text = combined_report_text(report)
+    component = str(metadata.get("component") or "").strip().lower()
+    keywords = [str(item).lower() for item in metadata.get("keywords") or []]
+    resolution = str(metadata.get("resolution") or "").upper()
+    score = 0
+    signals: List[str] = []
+
+    if str(report.get("description") or "").strip():
+        score += 1
+        signals.append("has_description")
+    if report.get("testcases"):
+        score += 3
+        signals.append("has_extractable_testcase")
+    if component in GENERAL_QUALITY_COMPONENTS:
+        score += 1
+        signals.append(f"component_{component}")
+    if "regression" in keywords:
+        score += 1
+        signals.append("keyword_regression")
+
+    for name, pattern in GENERAL_FAILURE_SIGNALS.items():
+        if pattern.search(text):
+            score += 2
+            signals.append(name)
+    for name, pattern in GENERAL_REPRO_SIGNALS.items():
+        if pattern.search(text):
+            score += 1
+            signals.append(name)
+
+    if resolution in NON_BUG_RESOLUTIONS:
+        score -= 6
+        signals.append(f"excluded_resolution_{resolution.lower()}")
+    elif resolution in {"FIXED", "DUPLICATE", "WORKSFORME"}:
+        score += 1
+        signals.append(f"resolution_{resolution.lower()}")
+
+    return {
+        "score": max(0, score),
+        "signals": sorted(set(signals)),
+        "component": component,
+        "quality_tier": "high" if score >= 8 else "medium" if score >= 6 else "low",
+    }
+
+
 def classify_architecture_scope(report: Dict[str, Any]) -> Dict[str, Any]:
     metadata = report.get("metadata") or {}
     text_parts = [
@@ -361,7 +459,10 @@ def classify_architecture_scope(report: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def finalize_report_quality_fields(report: Dict[str, Any]) -> Dict[str, Any]:
+def finalize_report_quality_fields(
+    report: Dict[str, Any],
+    general_quality_min_score: int = DEFAULT_GENERAL_QUALITY_MIN_SCORE,
+) -> Dict[str, Any]:
     metadata = report.get("metadata") or {}
     description = str(report.get("description") or "")
     testcases = report.get("testcases") or []
@@ -410,6 +511,20 @@ def finalize_report_quality_fields(report: Dict[str, Any]) -> Dict[str, Any]:
         expanded_exclusions.append(f"resolution_{resolution.lower()}")
     report["expanded_llm_ready_exclusion_reasons"] = expanded_exclusions
     report["expanded_llm_ready"] = not expanded_exclusions
+
+    general_quality = classify_general_quality(report)
+    general_exclusions: List[str] = []
+    if general_quality["score"] < general_quality_min_score:
+        general_exclusions.append(f"quality_score_below_{general_quality_min_score}")
+    if not description.strip():
+        general_exclusions.append("missing_bug_description")
+    if not testcases:
+        general_exclusions.append("missing_testcase")
+    if not disposition["eligible_as_gcc_bug_report"]:
+        general_exclusions.append(f"resolution_{resolution.lower()}")
+    report["general_quality"] = general_quality
+    report["general_llm_ready_exclusion_reasons"] = general_exclusions
+    report["general_llm_ready"] = not general_exclusions
     return report
 
 
@@ -651,6 +766,10 @@ def render_report_markdown(report: Dict[str, Any]) -> str:
         f"- LLM-ready exclusions: `{', '.join(report['llm_ready_exclusion_reasons']) or 'none'}`",
         f"- Expanded LLM ready: `{str(report['expanded_llm_ready']).lower()}`",
         f"- Expanded exclusions: `{', '.join(report['expanded_llm_ready_exclusion_reasons']) or 'none'}`",
+        f"- General quality score: `{(report.get('general_quality') or {}).get('score', 0)}`",
+        f"- General quality signals: `{', '.join((report.get('general_quality') or {}).get('signals') or []) or 'none'}`",
+        f"- General LLM ready: `{str(report.get('general_llm_ready', False)).lower()}`",
+        f"- General exclusions: `{', '.join(report.get('general_llm_ready_exclusion_reasons') or []) or 'none'}`",
         "",
         "## Original bug description",
         "",
@@ -692,13 +811,15 @@ def build_report(
     gcc_source: Optional[Path],
     max_attachment_bytes: int,
     discovery_sources: Sequence[str],
+    corpus_scope: str = "loongarch",
+    general_quality_min_score: int = DEFAULT_GENERAL_QUALITY_MIN_SCORE,
 ) -> Optional[Dict[str, Any]]:
     bug_id = int(metadata["id"])
     report_dir = archive_dir / "reports" / f"bug-{bug_id}"
     comments_payload = client.get_json(f"bug/{bug_id}/comment")
     comments = bug_comments(comments_payload, bug_id)
     relevance = classify_full_relevance(metadata, comments, local_tests, discovery_sources)
-    if relevance["tier"] == "not_loongarch":
+    if corpus_scope == "loongarch" and relevance["tier"] == "not_loongarch":
         return None
 
     raw_dir = report_dir / "raw"
@@ -821,6 +942,7 @@ def build_report(
         "archived_at": utc_now(),
         "source": "GCC Bugzilla public REST API",
         "source_url": DEFAULT_WEB_URL.format(bug_id=bug_id),
+        "corpus_scope": corpus_scope,
         "discovery_sources": sorted(set(discovery_sources)),
         "metadata": metadata,
         "relevance": relevance,
@@ -829,7 +951,7 @@ def build_report(
         "attachments": archived_attachments,
         "testcases": testcases,
     }
-    finalize_report_quality_fields(report)
+    finalize_report_quality_fields(report, general_quality_min_score=general_quality_min_score)
     write_json_atomic(report_dir / "report.json", report)
     write_text_atomic(report_dir / "report.md", render_report_markdown(report))
     return report
@@ -857,6 +979,13 @@ def report_index_record(report: Dict[str, Any]) -> Dict[str, Any]:
         "expanded_llm_ready": report["expanded_llm_ready"],
         "expanded_llm_ready_exclusion_reasons": ";".join(
             report["expanded_llm_ready_exclusion_reasons"]
+        ),
+        "general_quality_score": (report.get("general_quality") or {}).get("score", 0),
+        "general_quality_tier": (report.get("general_quality") or {}).get("quality_tier", "low"),
+        "general_quality_signals": ";".join((report.get("general_quality") or {}).get("signals") or []),
+        "general_llm_ready": bool(report.get("general_llm_ready")),
+        "general_llm_ready_exclusion_reasons": ";".join(
+            report.get("general_llm_ready_exclusion_reasons") or []
         ),
         "source_url": report["source_url"],
         "report_path": f"reports/bug-{metadata['id']}/report.json",
@@ -891,7 +1020,7 @@ def llm_dataset_record(archive_dir: Path, report: Dict[str, Any]) -> Dict[str, A
         )
     return {
         "schema_version": SCHEMA_VERSION,
-        "purpose": "LoongArch64 GCC compiler quality test generation",
+        "purpose": "GCC compiler quality test generation",
         "bug_id": bug_id,
         "source_url": report["source_url"],
         "summary": metadata.get("summary", ""),
@@ -902,6 +1031,7 @@ def llm_dataset_record(archive_dir: Path, report: Dict[str, Any]) -> Dict[str, A
         "known_to_fail": metadata.get("cf_known_to_fail", ""),
         "known_to_work": metadata.get("cf_known_to_work", ""),
         "architecture_scope": report["architecture_scope"],
+        "general_quality": report.get("general_quality") or {},
         "description": report["description"],
         "technical_comments": [
             {
@@ -942,6 +1072,20 @@ def write_indexes(archive_dir: Path, reports: Sequence[Dict[str, Any]]) -> Dict[
         "".join(
             json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
             for record in expanded_dataset
+        ),
+    )
+    general_ready = [record for record in records if record.get("general_llm_ready")]
+    write_text_atomic(
+        archive_dir / "llm-general-ready.jsonl",
+        "".join(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n" for record in general_ready),
+    )
+    general_reports = [report for report in reports if report.get("general_llm_ready")]
+    general_dataset = [llm_dataset_record(archive_dir, report) for report in general_reports]
+    write_text_atomic(
+        archive_dir / "llm-general-dataset.jsonl",
+        "".join(
+            json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+            for record in general_dataset
         ),
     )
 
@@ -1008,6 +1152,9 @@ def write_indexes(archive_dir: Path, reports: Sequence[Dict[str, Any]]) -> Dict[
         "llm_dataset_records": len(llm_dataset),
         "expanded_llm_ready_reports": len(expanded_ready),
         "expanded_llm_dataset_records": len(expanded_dataset),
+        "general_llm_ready_reports": len(general_ready),
+        "general_llm_dataset_records": len(general_dataset),
+        "high_quality_general_reports": sum(record.get("general_quality_tier") == "high" for record in records),
         "testcase_artifacts": sum(record["testcase_count"] for record in records),
         "loongarch_observed_reports": sum(
             record["relevance_tier"] == "loongarch_observed" for record in records
@@ -1051,6 +1198,9 @@ Purpose: LoongArch64 GCC compiler quality and CI data preparation; this is not n
 | Direct LLM dataset records | {counts['llm_dataset_records']} |
 | Expanded LLM-ready reports | {counts['expanded_llm_ready_reports']} |
 | Expanded LLM dataset records | {counts['expanded_llm_dataset_records']} |
+| General quality LLM-ready reports | {counts['general_llm_ready_reports']} |
+| General quality dataset records | {counts['general_llm_dataset_records']} |
+| High-quality general reports | {counts['high_quality_general_reports']} |
 | LoongArch failures observed in comments | {counts['loongarch_observed_reports']} |
 | LoongArch testsuite-linked reports | {counts['loongarch_testsuite_linked_reports']} |
 | LoongArch validation-only reports | {counts['loongarch_validation_only_reports']} |
@@ -1063,7 +1213,7 @@ Purpose: LoongArch64 GCC compiler quality and CI data preparation; this is not n
 | Expanded LLM-ready vectorization/SIMD reports | {counts['expanded_llm_vector_related_reports']} |
 | Testcase artifacts | {counts['testcase_artifacts']} |
 
-Use `llm-dataset.jsonl` for the high-precision core. Use `llm-expanded-dataset.jsonl` when generic GCC bugs reproduced on LoongArch64 or linked by LoongArch tests are also desired. The corresponding compact indexes are `llm-ready.jsonl` and `llm-expanded-ready.jsonl`.
+Use `llm-dataset.jsonl` for the high-precision LoongArch core. Use `llm-expanded-dataset.jsonl` when generic GCC bugs reproduced on LoongArch64 or linked by LoongArch tests are also desired. Use `llm-general-dataset.jsonl` for architecture-neutral high-quality GCC bugs selected by failure/reproducer/testcase signals. The corresponding compact indexes are `llm-ready.jsonl`, `llm-expanded-ready.jsonl`, and `llm-general-ready.jsonl`.
 """
     write_text_atomic(archive_dir / "SUMMARY.md", summary)
     return counts
@@ -1110,7 +1260,10 @@ def rebuild_archive(archive_dir: Path) -> Dict[str, Any]:
                     testcase["language"] = language_for_content(
                         testcase_path.read_text(encoding="utf-8", errors="replace")
                     )
-        finalize_report_quality_fields(report)
+        finalize_report_quality_fields(
+            report,
+            general_quality_min_score=int(manifest.get("general_quality_min_score") or DEFAULT_GENERAL_QUALITY_MIN_SCORE),
+        )
         write_json_atomic(report_path, report)
         write_text_atomic(report_dir / "report.md", render_report_markdown(report))
         reports.append(report)
@@ -1132,6 +1285,9 @@ def sync_archive(
     max_attachment_bytes: int = 5_000_000,
     refresh: bool = False,
     limit: int = 0,
+    corpus_scope: str = "loongarch",
+    general_query_limit: int = DEFAULT_GENERAL_QUERY_LIMIT,
+    general_quality_min_score: int = DEFAULT_GENERAL_QUALITY_MIN_SCORE,
 ) -> Dict[str, Any]:
     archive_dir = archive_dir.resolve()
     archive_dir.mkdir(parents=True, exist_ok=True)
@@ -1144,57 +1300,67 @@ def sync_archive(
         timeout_seconds=timeout_seconds,
     )
 
+    if corpus_scope not in {"loongarch", "general-quality"}:
+        raise CorpusError(f"unsupported corpus scope: {corpus_scope}")
+
     version_payload = client.get_json("version")
-    common = {"limit": 0, "include_fields": ",".join(SEARCH_FIELDS)}
-    summary_payload = client.get_json("bug", {**common, "summary": "loongarch"})
-    target_payload = client.get_json(
-        "bug",
-        {
-            **common,
-            "f1": "cf_gcctarget",
-            "o1": "substring",
-            "v1": "loongarch",
-        },
-    )
-    comments_payload = client.get_json(
-        "bug",
-        {
-            **common,
-            "f1": "longdesc",
-            "o1": "substring",
-            "v1": "loongarch",
-        },
-    )
     write_json_atomic(raw_dir / "version.json", version_payload)
-    write_json_atomic(raw_dir / "search-summary-loongarch.json", summary_payload)
-    write_json_atomic(raw_dir / "search-target-loongarch.json", target_payload)
-    write_json_atomic(raw_dir / "search-comments-loongarch.json", comments_payload)
+    common = {"include_fields": ",".join(SEARCH_FIELDS)}
 
     candidates: Dict[int, Dict[str, Any]] = {}
     discovery_sources: Dict[int, List[str]] = {}
-    for source_name, payload in (
-        ("summary_contains_loongarch", summary_payload),
-        ("gcc_target_contains_loongarch", target_payload),
-        ("public_comment_contains_loongarch", comments_payload),
-    ):
-        for bug in payload.get("bugs") or []:
-            bug_id = int(bug["id"])
-            candidates[bug_id] = bug
-            discovery_sources.setdefault(bug_id, []).append(source_name)
+    raw_query_files: List[str] = ["version.json"]
 
-    loongarch_target_tests = discover_loongarch_target_regression_tests(gcc_source)
-    missing_test_ids = sorted(set(loongarch_target_tests) - set(candidates))
-    testsuite_payload: Dict[str, Any] = {"bugs": [], "faults": []}
-    if missing_test_ids:
-        testsuite_payload = client.get_json(
-            "bug",
-            {"id": missing_test_ids, "include_fields": ",".join(SEARCH_FIELDS)},
+    if corpus_scope == "loongarch":
+        loongarch_common = {**common, "limit": 0}
+        discovery_queries = (
+            ("search-summary-loongarch.json", "summary_contains_loongarch", {"summary": "loongarch"}),
+            (
+                "search-target-loongarch.json",
+                "gcc_target_contains_loongarch",
+                {"f1": "cf_gcctarget", "o1": "substring", "v1": "loongarch"},
+            ),
+            (
+                "search-comments-loongarch.json",
+                "public_comment_contains_loongarch",
+                {"f1": "longdesc", "o1": "substring", "v1": "loongarch"},
+            ),
         )
-        for bug in testsuite_payload.get("bugs") or []:
-            bug_id = int(bug["id"])
-            candidates[bug_id] = bug
-            discovery_sources.setdefault(bug_id, []).append("gcc_loongarch_testsuite_pr")
-    write_json_atomic(raw_dir / "search-testsuite-pr-ids.json", testsuite_payload)
+        for raw_name, source_name, query in discovery_queries:
+            payload = client.get_json("bug", {**loongarch_common, **query})
+            write_json_atomic(raw_dir / raw_name, payload)
+            raw_query_files.append(raw_name)
+            for bug in payload.get("bugs") or []:
+                bug_id = int(bug["id"])
+                candidates[bug_id] = bug
+                discovery_sources.setdefault(bug_id, []).append(source_name)
+
+        loongarch_target_tests = discover_loongarch_target_regression_tests(gcc_source)
+        missing_test_ids = sorted(set(loongarch_target_tests) - set(candidates))
+        testsuite_payload: Dict[str, Any] = {"bugs": [], "faults": []}
+        if missing_test_ids:
+            testsuite_payload = client.get_json(
+                "bug",
+                {"id": missing_test_ids, "include_fields": ",".join(SEARCH_FIELDS)},
+            )
+            for bug in testsuite_payload.get("bugs") or []:
+                bug_id = int(bug["id"])
+                candidates[bug_id] = bug
+                discovery_sources.setdefault(bug_id, []).append("gcc_loongarch_testsuite_pr")
+        write_json_atomic(raw_dir / "search-testsuite-pr-ids.json", testsuite_payload)
+        raw_query_files.append("search-testsuite-pr-ids.json")
+    else:
+        if general_query_limit <= 0:
+            raise CorpusError("general query limit must be positive")
+        general_common = {**common, "product": "gcc", "limit": general_query_limit}
+        for raw_name, source_name, query in GENERAL_DISCOVERY_QUERIES:
+            payload = client.get_json("bug", {**general_common, **query})
+            write_json_atomic(raw_dir / raw_name, payload)
+            raw_query_files.append(raw_name)
+            for bug in payload.get("bugs") or []:
+                bug_id = int(bug["id"])
+                candidates[bug_id] = bug
+                discovery_sources.setdefault(bug_id, []).append(source_name)
 
     ordered = [candidates[bug_id] for bug_id in sorted(candidates)]
     if limit > 0:
@@ -1224,6 +1390,8 @@ def sync_archive(
                 gcc_source,
                 max_attachment_bytes,
                 discovery_sources.get(bug_id, []),
+                corpus_scope=corpus_scope,
+                general_quality_min_score=general_quality_min_score,
             )
             if report is None:
                 discarded.append(bug_id)
@@ -1238,15 +1406,17 @@ def sync_archive(
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": utc_now(),
-        "purpose": "LoongArch GCC compiler quality and CI test corpus; not network security testing",
+        "purpose": "GCC compiler quality and CI test corpus; not network security testing",
+        "corpus_scope": corpus_scope,
+        "general_query_limit": general_query_limit if corpus_scope == "general-quality" else None,
+        "general_quality_min_score": general_quality_min_score,
         "source": "GCC Bugzilla public REST API",
         "base_url": base_url,
         "bugzilla_version": version_payload.get("version"),
         "queries": [
-            {"summary": "loongarch"},
-            {"field": "cf_gcctarget", "operator": "substring", "value": "loongarch"},
-            {"field": "public_comments", "operator": "substring", "value": "loongarch"},
-            {"source": "local GCC LoongArch testsuite", "key": "PR bug id"},
+            {"raw_file": name}
+            for name in raw_query_files
+            if name != "version.json"
         ],
         "gcc_source": str(gcc_source.resolve()) if gcc_source else None,
         "gcc_git_revision": git_revision(gcc_source),
@@ -1273,6 +1443,8 @@ def verify_archive(archive_dir: Path) -> Dict[str, int]:
     llm_dataset_path = archive_dir / "llm-dataset.jsonl"
     expanded_path = archive_dir / "llm-expanded-ready.jsonl"
     expanded_dataset_path = archive_dir / "llm-expanded-dataset.jsonl"
+    general_path = archive_dir / "llm-general-ready.jsonl"
+    general_dataset_path = archive_dir / "llm-general-dataset.jsonl"
     for required in (
         manifest_path,
         index_path,
@@ -1291,13 +1463,20 @@ def verify_archive(archive_dir: Path) -> Dict[str, int]:
         raise CorpusError("manifest contains fetch errors")
     if manifest.get("base_url") != DEFAULT_BASE_URL:
         raise CorpusError("manifest source is not the official GCC Bugzilla REST endpoint")
-    for raw_search in (
-        archive_dir / "raw" / "version.json",
-        archive_dir / "raw" / "search-summary-loongarch.json",
-        archive_dir / "raw" / "search-target-loongarch.json",
-        archive_dir / "raw" / "search-comments-loongarch.json",
-        archive_dir / "raw" / "search-testsuite-pr-ids.json",
-    ):
+    raw_query_files = [
+        str((query.get("raw_file") or ""))
+        for query in manifest.get("queries") or []
+        if query.get("raw_file")
+    ]
+    if not raw_query_files:
+        raw_query_files = [
+            "search-summary-loongarch.json",
+            "search-target-loongarch.json",
+            "search-comments-loongarch.json",
+            "search-testsuite-pr-ids.json",
+        ]
+    for raw_name in ["version.json", *raw_query_files]:
+        raw_search = archive_dir / "raw" / raw_name
         if not raw_search.is_file():
             raise CorpusError(f"missing raw Bugzilla discovery response: {raw_search}")
     records = [json.loads(line) for line in index_path.read_text(encoding="utf-8").splitlines() if line]
@@ -1313,6 +1492,14 @@ def verify_archive(archive_dir: Path) -> Dict[str, int]:
         for line in expanded_dataset_path.read_text(encoding="utf-8").splitlines()
         if line
     ]
+    general_records = [
+        json.loads(line) for line in general_path.read_text(encoding="utf-8").splitlines() if line
+    ] if general_path.is_file() else []
+    general_dataset_records = [
+        json.loads(line)
+        for line in general_dataset_path.read_text(encoding="utf-8").splitlines()
+        if line
+    ] if general_dataset_path.is_file() else []
     if {record["bug_id"] for record in ready_records} != {
         record["bug_id"] for record in records if record["llm_ready"]
     }:
@@ -1329,6 +1516,16 @@ def verify_archive(archive_dir: Path) -> Dict[str, int]:
         record["bug_id"] for record in expanded_records
     }:
         raise CorpusError("llm-expanded-dataset.jsonl does not match expanded index")
+    if general_path.is_file() and {record["bug_id"] for record in general_records} != {
+        record["bug_id"] for record in records if record.get("general_llm_ready")
+    }:
+        raise CorpusError("llm-general-ready.jsonl does not match index.jsonl")
+    if general_dataset_path.is_file() and {record["bug_id"] for record in general_dataset_records} != {
+        record["bug_id"] for record in general_records
+    }:
+        raise CorpusError("llm-general-dataset.jsonl does not match general index")
+
+    corpus_scope = str(manifest.get("corpus_scope") or "loongarch")
 
     testcase_count = 0
     reports_by_id: Dict[int, Dict[str, Any]] = {}
@@ -1353,7 +1550,7 @@ def verify_archive(archive_dir: Path) -> Dict[str, int]:
         expected_description = str(comments[0].get("text") or "") if comments else ""
         if str(report.get("description") or "") != expected_description:
             raise CorpusError(f"description is not the original first public comment: {report_path}")
-        if report["relevance"]["tier"] == "not_loongarch":
+        if corpus_scope == "loongarch" and report["relevance"]["tier"] == "not_loongarch":
             raise CorpusError(f"non-LoongArch report leaked into archive: {report_path}")
         if report["llm_ready"]:
             if report["relevance"]["tier"] != "architecture_specific":
@@ -1443,12 +1640,30 @@ def verify_archive(archive_dir: Path) -> Dict[str, int]:
             if sha256_bytes(source_path.read_bytes()) != testcase["source_sha256"]:
                 raise CorpusError(f"expanded LLM dataset source checksum mismatch: {source_path}")
 
+    for dataset in general_dataset_records:
+        bug_id = int(dataset["bug_id"])
+        report = reports_by_id[bug_id]
+        if not report.get("general_llm_ready"):
+            raise CorpusError(f"general LLM dataset includes ineligible bug {bug_id}")
+        if dataset.get("description") != report.get("description"):
+            raise CorpusError(f"general LLM dataset description mismatch for bug {bug_id}")
+        if not (dataset.get("testcases") or []):
+            raise CorpusError(f"general LLM dataset lacks testcase content for bug {bug_id}")
+        for testcase in dataset.get("testcases") or []:
+            source_path = archive_dir / testcase["source_path"]
+            if not source_path.is_file():
+                raise CorpusError(f"general LLM dataset source path is missing: {source_path}")
+            if sha256_bytes(source_path.read_bytes()) != testcase["source_sha256"]:
+                raise CorpusError(f"general LLM dataset source checksum mismatch: {source_path}")
+
     counts = {
         "reports": len(records),
         "llm_ready_reports": len(ready_records),
         "llm_dataset_records": len(dataset_records),
         "expanded_llm_ready_reports": len(expanded_records),
         "expanded_llm_dataset_records": len(expanded_dataset_records),
+        "general_llm_ready_reports": len(general_records),
+        "general_llm_dataset_records": len(general_dataset_records),
         "testcase_artifacts": testcase_count,
     }
     expected = manifest.get("counts") or {}
@@ -1462,6 +1677,10 @@ def verify_archive(archive_dir: Path) -> Dict[str, int]:
         raise CorpusError("manifest expanded-ready count does not match archive")
     if expected.get("expanded_llm_dataset_records") != counts["expanded_llm_dataset_records"]:
         raise CorpusError("manifest expanded dataset count does not match archive")
+    if general_path.is_file() and expected.get("general_llm_ready_reports") != counts["general_llm_ready_reports"]:
+        raise CorpusError("manifest general-ready count does not match archive")
+    if general_dataset_path.is_file() and expected.get("general_llm_dataset_records") != counts["general_llm_dataset_records"]:
+        raise CorpusError("manifest general dataset count does not match archive")
     if expected.get("testcase_artifacts") != counts["testcase_artifacts"]:
         raise CorpusError("manifest test case count does not match archive")
     return counts

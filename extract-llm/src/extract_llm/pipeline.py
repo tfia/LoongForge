@@ -118,8 +118,13 @@ def report_bug_id_from_path(path: Path) -> int:
 
 def sorted_report_paths(corpus_dir: Path) -> List[Path]:
     reports_dir = corpus_dir / "archive" / "reports"
+    if not reports_dir.is_dir() and (corpus_dir / "reports").is_dir():
+        reports_dir = corpus_dir / "reports"
     if not reports_dir.is_dir():
-        raise PipelineError(f"corpus reports directory does not exist: {reports_dir}")
+        raise PipelineError(
+            "corpus reports directory does not exist; expected either "
+            f"{corpus_dir / 'archive' / 'reports'} or {corpus_dir / 'reports'}"
+        )
     paths = list(reports_dir.glob("bug-*/report.json"))
     return sorted(paths, key=report_bug_id_from_path)
 
@@ -132,7 +137,8 @@ def testcase_full_path(report_path: Path, testcase: Dict[str, Any]) -> Path:
     if rel_path.is_absolute():
         return rel_path
     if str(rel).startswith("reports/"):
-        return report_path.parents[1] / rel_path
+        archive_root = report_path.parents[2]
+        return archive_root / rel_path
     return report_path.parent / rel_path
 
 

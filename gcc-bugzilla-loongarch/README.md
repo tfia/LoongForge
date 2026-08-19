@@ -1,6 +1,6 @@
-# GCC Bugzilla LoongArch 质量测试语料归档器
+# GCC Bugzilla 质量测试语料归档器
 
-该项目通过 GCC Bugzilla 的公开 REST API，归档与 LoongArch/LoongArch64 明确相关的历史 bug report、原始描述、公开评论、复现附件和 GCC testsuite 中按 PR 编号关联的回归测试。
+该项目通过 GCC Bugzilla 的公开 REST API，归档历史 bug report、原始描述、公开评论、复现附件和 GCC testsuite 中按 PR 编号关联的回归测试。默认模式仍归档与 LoongArch/LoongArch64 明确相关的报告；新增 `general-quality` 模式可采样通用 GCC 高质量 bug，用于提炼更泛化的 compiler feature。
 
 用途是为团队自有 LoongArch GCC fork 建立自动化编译器质量测试数据集，并为后续 LLM 提取 bug 特征、生成新 C/C++ 测试用例提供可追溯输入。它不进行网络扫描、协议攻击、渗透测试或第三方目标测试，不属于网络安全测试。
 
@@ -22,6 +22,34 @@ uv run ./fetch_loongarch_bugs.py sync
 ```
 
 首次运行会创建 uv 管理的 Python 3.12 虚拟环境。项目的抓取逻辑只使用 Python 标准库，没有额外运行时依赖。
+
+
+## 通用高质量 GCC bug 抓取
+
+领导提出的“能否抓取 Bugzilla 上所有 bug”已经拆成更可控的工程入口：爬虫不做无差别全量镜像，而是新增 `--scope general-quality`，从公开 GCC Bugzilla 中按高质量信号抽样抓取通用 bug。这样能给 ExtractLLM 提供更多架构无关的优化器、前端、RTL、C++、Fortran 等 feature，同时避免把大量缺少复现材料、讨论型或无效报告灌入 LLM。
+
+示例：
+
+```bash
+uv run loongarch-bug-corpus sync \
+  --scope general-quality \
+  --archive-dir archive-general-quality \
+  --general-query-limit 80 \
+  --general-quality-min-score 6 \
+  --limit 120 \
+  --delay 1.5
+uv run loongarch-bug-corpus verify --archive-dir archive-general-quality
+```
+
+筛选标准：
+
+- Bugzilla 产品限定为 GCC；
+- discovery query 优先搜索 ICE/internal compiler error、wrong-code/miscompilation、missed optimization、reduced testcase 等高价值信号；
+- 本地质量分数综合 description、可抽取 testcase、reduced/preprocessed source、命令行、regression、compiler component、resolution 等信号；
+- `INVALID`/`MOVED` 不进入 LLM 数据集；
+- 通用输出写入 `llm-general-ready.jsonl` 和 `llm-general-dataset.jsonl`，不污染原有 LoongArch 专用 `llm-dataset.jsonl` / `llm-expanded-dataset.jsonl`。
+
+默认 `--general-query-limit 80` 是每条 discovery query 的上限，适合先抓数百级别候选；`--limit` 可用于开发烟测。通用全文 query 比 LoongArch 定向 query 更容易触发 Bugzilla 限流，建议设置 `--delay 1.5` 或更高。正式扩量时建议分批运行并观察 `general_quality_score`、testcase 数量和 ExtractLLM 的 parser/error 率，而不是一次性镜像全库。
 
 ## 数据范围与分层筛选
 

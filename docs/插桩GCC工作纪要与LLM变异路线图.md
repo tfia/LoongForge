@@ -357,6 +357,9 @@ AFL custom mutator 高频消费
 - `/Users/mac/work/loong-gcc-afl/extract-llm/out/feature-pool-manifest.json`：feature 数量、compiler area、failure mode、语言分布；
 - `/Users/mac/work/loong-gcc-afl/extract-llm/README.md`：复现命令、质量边界和使用说明。
 
+
+2026-08-19 根据领导关于“通用 GCC bug 是否更适合提炼高质量 feature”的问题，爬虫设计扩展为双模式：默认 `loongarch` 模式保持现有 LoongArch 专项口径；新增 `general-quality` 模式按 ICE、wrong-code/miscompilation、missed optimization、reduced testcase、preprocessed source、命令行、regression 和 compiler component 等信号，从 GCC Bugzilla 中抽样抓取通用高质量 bug。通用数据单独输出到 `llm-general-ready.jsonl` 和 `llm-general-dataset.jsonl`，不会污染 LoongArch 专用数据集。建议先以每个 query 80 条、总量百级别的规模试跑，再观察 ExtractLLM feature 数量、parser error 和后续 AFL edge 增益决定是否扩量。
+
 这一步把“历史 bug report + PoC + fix history”转成了可采样、可组合、可审计的语义 feature 池。下一步可以基于 feature pool 做离线组合生成：先按 compiler area、target option、failure mode 采样组合，再由 LLM/结构化生成器产出候选 C/C++ 测试，最后用当前 AFL showmap wrapper 做覆盖筛选，只有带来新增覆盖或触发 ICE 的样例进入 CI corpus。
 
 ## 十一、向管理层汇报的建议表述

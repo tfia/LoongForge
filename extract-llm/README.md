@@ -25,6 +25,8 @@ Feature =
 
 注意：一条 bug report 不等于一个 feature。一条报告可能同时暴露多个可复用语义不变量，例如“循环中保持不变的值在循环后使用”“sibcall 与寄存器分配交互”“特定 target option 下触发向量模式选择”等。每个 `bug-*.features.json` 里的 `features` 都是数组，`feature-pool.jsonl` 会把它们展平成一行一个 feature，供后续组合采样。
 
+`prepare` 支持两种 corpus 布局：可以指向包含 `archive/reports/` 的爬虫工程目录，也可以直接指向某个包含 `reports/` 的 archive 目录。因此通用 Bugzilla 语料可以用 `--corpus-dir ../gcc-bugzilla-loongarch/archive-general-quality` 单独准备到另一个输出目录，避免污染现有 LoongArch feature pool。
+
 ## 快速运行
 
 ```bash
@@ -50,6 +52,24 @@ uv run extract-llm verify \
   --output-dir /Users/mac/work/loong-gcc-afl/extract-llm/out \
   --require-outputs \
   --fail-on-api-error
+```
+
+通用高质量 GCC bug 小批量 feature 提取建议使用独立输出目录：
+
+```bash
+uv run extract-llm prepare \
+  --corpus-dir /Users/mac/work/loong-gcc-afl/gcc-bugzilla-loongarch/archive-general-quality \
+  --output-dir /Users/mac/work/loong-gcc-afl/extract-llm/out-general-quality
+
+uv run extract-llm run \
+  --output-dir /Users/mac/work/loong-gcc-afl/extract-llm/out-general-quality \
+  --model deepseek-v4-pro \
+  --limit 40 \
+  --max-prompt-chars 120000 \
+  --keep-going
+
+uv run extract-llm build-pool \
+  --output-dir /Users/mac/work/loong-gcc-afl/extract-llm/out-general-quality
 ```
 
 API key 只从环境变量读取，不会写入 `out/` 或源码文件。`out/raw-responses/` 保存 DeepSeek 返回体，方便追溯 token usage 和模型响应；里面也不包含 API key。

@@ -291,6 +291,18 @@ AFL edge 结果：
 - 当前 AFL union edge 增长已经明显进入边际递减区间：08-13 三轮依次新增 +7,292、+2,228、+1,545。短期更有效的方向不是无控制增加轮数，而是提高 oracle 质量、修复 InstanLLM not-ready/rejected、并为 assembly-scan/diagnostic/多语言 group 补齐专用 harness。
 - 当前没有发现 ICE-like crash。所有 `instan-llm/out/evaluations.jsonl` 中的状态为 `covered=471`、`skipped_not_ready=27`、`ice=0`。
 
+
+## 2026-08-13 并发长程三轮变化表
+
+| 轮次 | candidates | GroupLLM ready | InstanLLM/AFL covered | AFL union edge 起点 | AFL union edge 终点 | 新增 edge | ICE | 近似 wall time |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 第 1 并发轮（含 timeout 补跑） | 48 | 46 | 44 | 288,889 | 296,181 | +7,292 | 0 | 约 0.99 小时 |
+| 第 2 并发轮 | 48 | 44 | 40 | 296,181 | 298,409 | +2,228 | 0 | 约 1.08 小时 |
+| 第 3 并发轮 | 48 | 43 | 42 | 298,409 | 299,954 | +1,545 | 0 | 约 0.95 小时 |
+| 合计 | 144 | 133 | 126 | 288,889 | 299,954 | +11,065 | 0 | 约 3.04 小时 |
+
+并发优化后，GroupLLM 并发为 6、InstanLLM 并发为 4。第 1 并发轮初跑 timeout 的 5 个子任务已补跑成功；第 2/3 轮放宽 process timeout 到 720 秒后没有再出现 process timeout。三轮 edge 增量递减，说明当前 corpus 已开始进入边际收益下降区间，后续应优先提高 oracle、补齐专用 harness、降低 not-ready/rejected，而不是单纯无限加轮数。
+
 ## ICE / crash 处理口径
 
 当前 InstanLLM evaluator 已把 GCC `ICE_EXIT_CODE=4` 识别为 `evaluation_status="ice"`。这一步只说明“被测 GCC 前端在该 generated program 上出现了 ICE-like crash”，不能直接宣布发现新 bug。

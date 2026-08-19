@@ -68,6 +68,15 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(record["bug_triggering_programs"][0]["content"], "int f(int x) { return x + 1; }\n")
             self.assertTrue(record["fix_history"]["available"])
 
+    def test_prepare_corpus_accepts_archive_dir_directly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus = self.make_corpus(root)
+            archive = corpus / "archive"
+            out = root / "out"
+            manifest = prepare_corpus(archive, out)
+            self.assertEqual(manifest["counts"]["bug_reports"], 1)
+
     def test_extract_fix_history_finds_commit_hash(self) -> None:
         report = {
             "comments": [

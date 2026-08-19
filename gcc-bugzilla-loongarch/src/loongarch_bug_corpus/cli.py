@@ -10,6 +10,8 @@ from typing import Optional, Sequence
 
 from .core import (
     DEFAULT_BASE_URL,
+    DEFAULT_GENERAL_QUERY_LIMIT,
+    DEFAULT_GENERAL_QUALITY_MIN_SCORE,
     DEFAULT_USER_AGENT,
     CorpusError,
     rebuild_archive,
@@ -25,8 +27,9 @@ def project_root() -> Path:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Archive public LoongArch-related GCC Bugzilla reports and reproducible "
-            "test cases for compiler quality/CI work."
+            "Archive public GCC Bugzilla reports and reproducible test cases for compiler "
+            "quality/CI work. The default scope remains LoongArch; use --scope general-quality "
+            "to sample architecture-neutral high-quality GCC bugs."
         )
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -46,6 +49,24 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument("--max-attachment-bytes", type=int, default=5_000_000)
     sync.add_argument("--refresh", action="store_true", help="refetch unchanged reports")
     sync.add_argument("--limit", type=int, default=0, help="development only: process first N bugs")
+    sync.add_argument(
+        "--scope",
+        choices=("loongarch", "general-quality"),
+        default="loongarch",
+        help="loongarch keeps the existing LoongArch-only archive; general-quality samples high-signal generic GCC bugs",
+    )
+    sync.add_argument(
+        "--general-query-limit",
+        type=int,
+        default=DEFAULT_GENERAL_QUERY_LIMIT,
+        help="per-query Bugzilla result cap for --scope general-quality",
+    )
+    sync.add_argument(
+        "--general-quality-min-score",
+        type=int,
+        default=DEFAULT_GENERAL_QUALITY_MIN_SCORE,
+        help="minimum local quality score for llm-general-dataset.jsonl",
+    )
 
     verify = subparsers.add_parser("verify", help="verify scope, indexes, test cases, and checksums")
     verify.add_argument("--archive-dir", type=Path, default=project_root() / "archive")
@@ -64,7 +85,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         if args.command == "sync":
-            if args.delay < 0 or args.timeout <= 0 or args.max_attachment_bytes <= 0 or args.limit < 0:
+            if (
+                args.delay < 0
+                or args.timeout <= 0
+                or args.max_attachment_bytes <= 0
+                or args.limit < 0
+                or args.general_query_limit <= 0
+                or args.general_quality_min_score < 0
+            ):
                 raise CorpusError("delay/timeout/attachment size/limit values are invalid")
             gcc_source = args.gcc_source if args.gcc_source.is_dir() else None
             manifest = sync_archive(
@@ -77,6 +105,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 max_attachment_bytes=args.max_attachment_bytes,
                 refresh=args.refresh,
                 limit=args.limit,
+                corpus_scope=args.scope,
+                general_query_limit=args.general_query_limit,
+                general_quality_min_score=args.general_quality_min_score,
             )
             print(json.dumps(manifest["counts"], ensure_ascii=False, indent=2, sort_keys=True))
             print(f"manifest: {args.archive_dir.resolve() / 'manifest.json'}")

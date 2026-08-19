@@ -6,6 +6,7 @@ from pathlib import Path
 from loongarch_bug_corpus.core import (
     classify_relevance,
     classify_architecture_scope,
+    classify_general_quality,
     classify_full_relevance,
     extract_comment_testcases,
     is_source_attachment,
@@ -74,6 +75,34 @@ class RelevanceTests(unittest.TestCase):
             ["public_comment_contains_loongarch"],
         )
         self.assertEqual(result["tier"], "loongarch_validation_only")
+
+
+    def test_general_quality_scores_reduced_ice_with_testcase(self):
+        report = {
+            "metadata": {
+                "summary": "ICE in tree optimizer with reduced testcase",
+                "component": "tree-optimization",
+                "resolution": "FIXED",
+                "keywords": ["regression"],
+            },
+            "description": "Reduced testcase: compile with gcc -O2 t.c and get an internal compiler error.",
+            "comments": [],
+            "testcases": [{"path": "testcases/t.c", "provenance": {}}],
+        }
+        quality = classify_general_quality(report)
+        self.assertGreaterEqual(quality["score"], 6)
+        self.assertIn("ice", quality["signals"])
+        self.assertIn("has_extractable_testcase", quality["signals"])
+
+    def test_general_quality_penalizes_invalid_without_testcase(self):
+        report = {
+            "metadata": {"summary": "question", "component": "other", "resolution": "INVALID"},
+            "description": "not a compiler bug",
+            "comments": [],
+            "testcases": [],
+        }
+        quality = classify_general_quality(report)
+        self.assertLess(quality["score"], 6)
 
     def test_regression_tested_footer_is_not_an_observed_failure(self):
         result = classify_full_relevance(
